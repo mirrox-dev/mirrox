@@ -25,8 +25,17 @@ async fn upstream(
         .unwrap()
         .to_string();
     let path = request.uri().path_and_query().unwrap().as_str().to_string();
-    state.lock().await.push(format!("{host}{path}"));
-    Json(json!({ "host": host, "path": path }))
+    let user_agent = request
+        .headers()
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    state
+        .lock()
+        .await
+        .push(format!("{host}{path}|ua={user_agent}"));
+    Json(json!({ "host": host, "path": path, "user_agent": user_agent }))
 }
 
 async fn spawn_upstream() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<String>>>) {
@@ -53,6 +62,7 @@ async fn forwards_request_to_matched_upstream() {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
     "#,
     )
     .unwrap();
@@ -71,11 +81,12 @@ async fn forwards_request_to_matched_upstream() {
     response.assert_status_ok();
     response.assert_json(&json!({
         "host": "api.example.com",
-        "path": "/v0/subjects/1?responseGroup=small"
+        "path": "/v0/subjects/1?responseGroup=small",
+        "user_agent": ""
     }));
     assert_eq!(
         seen.lock().await[0],
-        "api.bgm.tv/v0/subjects/1?responseGroup=small"
+        "api.bgm.tv/v0/subjects/1?responseGroup=small|ua="
     );
 }
 
@@ -90,6 +101,7 @@ async fn rejects_unknown_host() {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
     "#,
     )
     .unwrap();
@@ -135,6 +147,7 @@ async fn rewrites_response_headers_and_text_body() {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
     "#,
     )
     .unwrap();
@@ -179,6 +192,7 @@ async fn http_only_route_does_not_rewrite_body() {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
         body_rewrite = "http-only"
     "#,
     )
@@ -246,6 +260,7 @@ async fn forwards_request_through_http_upstream_proxy() {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
     "#
     ))
     .unwrap();
@@ -263,7 +278,7 @@ async fn forwards_request_through_http_upstream_proxy() {
 
     response.assert_status_ok();
     assert!(proxy_used.load(Ordering::SeqCst));
-    assert_eq!(seen.lock().await[0], "api.bgm.tv/v0/proxy");
+    assert_eq!(seen.lock().await[0], "api.bgm.tv/v0/proxy|ua=");
 }
 
 #[tokio::test]
@@ -287,6 +302,7 @@ async fn route_direct_override_bypasses_global_upstream_proxy() {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
         upstream_proxy = "direct"
     "#
     ))
@@ -304,7 +320,7 @@ async fn route_direct_override_bypasses_global_upstream_proxy() {
         .await;
 
     response.assert_status_ok();
-    assert_eq!(seen.lock().await[0], "api.bgm.tv/direct");
+    assert_eq!(seen.lock().await[0], "api.bgm.tv/direct|ua=");
 }
 
 async fn spawn_socks5_forward_proxy(target: SocketAddr) -> SocketAddr {
@@ -352,6 +368,7 @@ async fn forwards_request_through_socks5_upstream_proxy() {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
     "#
     ))
     .unwrap();
@@ -368,5 +385,147 @@ async fn forwards_request_through_socks5_upstream_proxy() {
         .await;
 
     response.assert_status_ok();
-    assert_eq!(seen.lock().await[0], "api.bgm.tv/socks");
+    assert_eq!(seen.lock().await[0], "api.bgm.tv/socks|ua=");
+}
+
+#[tokio::test]
+async fn route_can_forward_to_http_custom_port() {
+    let (addr, seen) = spawn_upstream().await;
+    let config = AppConfig::from_toml_str(&format!(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+        upstream_port = {}
+    "#,
+        addr.port()
+    ))
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+
+    let server = axum_test::TestServer::new(app).unwrap();
+    let response = server
+        .get("/custom-port")
+        .add_header("host", "api.example.com")
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(seen.lock().await[0], "api.bgm.tv/custom-port|ua=");
+}
+
+#[tokio::test]
+async fn route_user_agent_overrides_client_header() {
+    let (addr, seen) = spawn_upstream().await;
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+        user_agent = "Mirrox-UA/1.0"
+    "#,
+    )
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+
+    let server = axum_test::TestServer::new(app).unwrap();
+    let response = server
+        .get("/ua")
+        .add_header("host", "api.example.com")
+        .add_header("user-agent", "Client-UA/9.9")
+        .await;
+
+    response.assert_status_ok();
+    response.assert_json(&json!({
+        "host": "api.example.com",
+        "path": "/ua",
+        "user_agent": "Mirrox-UA/1.0"
+    }));
+    assert_eq!(seen.lock().await[0], "api.bgm.tv/ua|ua=Mirrox-UA/1.0");
+}
+
+#[tokio::test]
+async fn wildcard_user_agent_overrides_client_header() {
+    let (addr, seen) = spawn_upstream().await;
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[wildcard_routes]]
+        incoming_suffix = ".example.com"
+        upstream_suffix = ".bgm.tv"
+        upstream_scheme = "http"
+        user_agent = "Wildcard-UA/2.0"
+    "#,
+    )
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+
+    let server = axum_test::TestServer::new(app).unwrap();
+    let response = server
+        .get("/wildcard-ua")
+        .add_header("host", "api.example.com")
+        .add_header("user-agent", "Client-UA/9.9")
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(
+        seen.lock().await[0],
+        "api.bgm.tv/wildcard-ua|ua=Wildcard-UA/2.0"
+    );
+}
+
+#[tokio::test]
+async fn omitted_user_agent_preserves_client_header() {
+    let (addr, seen) = spawn_upstream().await;
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+    "#,
+    )
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+
+    let server = axum_test::TestServer::new(app).unwrap();
+    let response = server
+        .get("/preserve-ua")
+        .add_header("host", "api.example.com")
+        .add_header("user-agent", "Client-UA/9.9")
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(
+        seen.lock().await[0],
+        "api.bgm.tv/preserve-ua|ua=Client-UA/9.9"
+    );
 }
