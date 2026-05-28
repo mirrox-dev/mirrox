@@ -1,6 +1,6 @@
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, USER_AGENT};
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Sse};
 use axum::routing::any;
@@ -39,6 +39,7 @@ async fn build_test_app(addr: SocketAddr, max_buffer_bytes: usize) -> Router {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
     "#
     ))
     .unwrap();
@@ -65,6 +66,24 @@ async fn build_test_app_with_proxy(addr: SocketAddr, upstream_proxy: &str) -> Ro
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+    "#
+    ))
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap()
+}
+
+async fn build_test_app_with_route_config(addr: SocketAddr, route_config: &str) -> Router {
+    let config = AppConfig::from_toml_str(&format!(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        {route_config}
     "#
     ))
     .unwrap();
@@ -96,6 +115,34 @@ async fn large_text_upstream(State(body): State<String>) -> impl IntoResponse {
 }
 
 async fn ws_upstream(upgrade: WebSocketUpgrade) -> impl IntoResponse {
+    upgrade.on_upgrade(echo_websocket)
+}
+
+async fn ws_seen_user_agent_upstream(
+    State(seen): State<Arc<tokio::sync::Mutex<Vec<String>>>>,
+    upgrade: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let user_agent = headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    seen.lock().await.push(user_agent);
+    upgrade.on_upgrade(echo_websocket)
+}
+
+async fn ws_seen_host_upstream(
+    State(seen): State<Arc<tokio::sync::Mutex<Vec<String>>>>,
+    upgrade: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let host = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    seen.lock().await.push(host);
     upgrade.on_upgrade(echo_websocket)
 }
 
@@ -196,6 +243,142 @@ async fn spawn_http_connect_proxy_for_ws(target: SocketAddr) -> (SocketAddr, Arc
             .unwrap();
     });
     (addr, used)
+}
+
+#[tokio::test]
+async fn websocket_uses_http_custom_upstream_port() {
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let upstream_app = Router::new()
+        .route("/*path", any(ws_seen_host_upstream))
+        .with_state(seen.clone());
+    let upstream_addr = spawn_upstream(upstream_app).await;
+    let proxy_app = build_test_app_with_route_config(
+        upstream_addr,
+        &format!(
+            r#"
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+        upstream_port = {}
+    "#,
+            upstream_addr.port()
+        ),
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, proxy_app).await.unwrap();
+    });
+    let url = format!("ws://{proxy_addr}/custom-port");
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("host", HeaderValue::from_static("api.example.com"));
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "custom-port".into(),
+        ))
+        .await
+        .unwrap();
+    let message = socket.next().await.unwrap().unwrap();
+
+    assert_eq!(
+        seen.lock().await[0],
+        format!("api.bgm.tv:{}", upstream_addr.port())
+    );
+    assert_eq!(
+        message,
+        tokio_tungstenite::tungstenite::Message::Text("custom-port".into())
+    );
+}
+
+#[tokio::test]
+async fn websocket_route_user_agent_overrides_client_header() {
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let upstream_app = Router::new()
+        .route("/*path", any(ws_seen_user_agent_upstream))
+        .with_state(seen.clone());
+    let upstream_addr = spawn_upstream(upstream_app).await;
+    let proxy_app = build_test_app_with_route_config(
+        upstream_addr,
+        r#"
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+        user_agent = "Mirrox-WS/1.0"
+    "#,
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, proxy_app).await.unwrap();
+    });
+    let url = format!("ws://{proxy_addr}/ua");
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("host", HeaderValue::from_static("api.example.com"));
+    request
+        .headers_mut()
+        .insert(USER_AGENT, HeaderValue::from_static("Client-WS/9.9"));
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text("ua".into()))
+        .await
+        .unwrap();
+    let _ = socket.next().await.unwrap().unwrap();
+
+    assert_eq!(seen.lock().await[0], "Mirrox-WS/1.0");
+}
+
+#[tokio::test]
+async fn websocket_omitted_user_agent_preserves_client_header() {
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let upstream_app = Router::new()
+        .route("/*path", any(ws_seen_user_agent_upstream))
+        .with_state(seen.clone());
+    let upstream_addr = spawn_upstream(upstream_app).await;
+    let proxy_app = build_test_app_with_route_config(
+        upstream_addr,
+        r#"
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+    "#,
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, proxy_app).await.unwrap();
+    });
+    let url = format!("ws://{proxy_addr}/ua-preserve");
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("host", HeaderValue::from_static("api.example.com"));
+    request
+        .headers_mut()
+        .insert(USER_AGENT, HeaderValue::from_static("Client-WS/9.9"));
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "ua-preserve".into(),
+        ))
+        .await
+        .unwrap();
+    let _ = socket.next().await.unwrap().unwrap();
+
+    assert_eq!(seen.lock().await[0], "Client-WS/9.9");
 }
 
 #[tokio::test]

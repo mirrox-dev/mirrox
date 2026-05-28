@@ -60,6 +60,10 @@ default = "socks5://user:pass@127.0.0.1:1080"
 incoming = "api.example.com"
 upstream = "api.bgm.tv"
 upstream_proxy = "direct"
+upstream_scheme = "https"
+upstream_port = 443
+# Omit user_agent to preserve the client's User-Agent.
+# user_agent = "Mirrox/0.1"
 ```
 
 ## Rewrite settings
@@ -82,24 +86,39 @@ SSE (`text/event-stream`) and non-text assets are streamed through without body 
 [[routes]]
 incoming = "api.example.com"
 upstream = "api.bgm.tv"
+# Defaults: upstream_scheme = "https", upstream_port = 443
 
 [[routes]]
 incoming = "www.example.com"
 upstream = "www.bgm.tv"
+upstream_scheme = "http"
+upstream_port = 8080
+user_agent = "Mozilla/5.0 (compatible; Mirrox)"
 body_rewrite = "http-only"
 ```
 
-Exact routes map one incoming host to one upstream host. Per-route `body_rewrite` overrides `[rewrite].body`.
+Exact routes map one incoming host to one upstream host. Upstream connections default to `upstream_scheme = "https"` and `upstream_port = 443`. Per-route `upstream_scheme` accepts `"http"` or `"https"`; `upstream_port` overrides the port used for the upstream TCP connection; `body_rewrite` overrides `[rewrite].body`.
+
+Set `user_agent` on a route to replace the upstream request `User-Agent` header. Omit `user_agent` to preserve the client's original `User-Agent`.
 
 ## Wildcard routes
 
 ```toml
 [[wildcard_routes]]
-incoming_suffix = ".mirror.example.com"
+incoming_suffix = ".moecloud.tk"
 upstream_suffix = ".bgm.tv"
+upstream_scheme = "https"
+upstream_port = 443
+# user_agent = "Mirrox/0.1"
 ```
 
-Wildcard routes map a single-label subdomain prefix to another suffix. For example, `api.mirror.example.com` maps to `api.bgm.tv`. Exact routes take priority over wildcard routes.
+Wildcard routes map a single-label subdomain prefix to another suffix. For example, `incoming_suffix = ".moecloud.tk"` with `upstream_suffix = ".bgm.tv"` maps `api.moecloud.tk` to `api.bgm.tv`. It only matches one label before the suffix, so `v1.api.moecloud.tk` is not matched by that wildcard route. Exact routes take priority over wildcard routes.
+
+Wildcard routes support the same upstream connection fields as exact routes: `upstream_scheme = "http"` or `"https"`, `upstream_port`, and `user_agent`. If omitted, wildcard upstreams also default to HTTPS on port `443` and preserve the client's `User-Agent`.
+
+## Cloudflare Tunnel deployments
+
+In `behind-proxy` mode, Mirrox is intended to sit behind another HTTPS terminator. With Cloudflare Tunnel, configure multiple public hostnames or a wildcard hostname to point at the same internal service, such as `http://mirrox:3000`. Cloudflare handles public HTTPS certificates and forwards HTTP to Mirrox inside your private network. Mirrox then reads the forwarded `Host` header, matches it against exact or wildcard routes, and connects to the configured upstream.
 
 ## Environment overrides
 

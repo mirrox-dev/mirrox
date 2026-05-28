@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, BodyRewriteMode};
+use crate::config::{AppConfig, BodyRewriteMode, UpstreamScheme};
 use crate::dns::SharedDnsResolver;
 use crate::error::AppError;
 use crate::rewrite::{
@@ -6,12 +6,12 @@ use crate::rewrite::{
     rewrite_text_body,
 };
 use crate::routing::{MatchedRoute, RouteTable};
-use crate::upstream_proxy::{boxed_body_io, UpstreamConnector};
+use crate::upstream_proxy::{boxed_body_io, maybe_tls_stream, UpstreamConnector};
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, SEC_WEBSOCKET_ACCEPT,
-    SEC_WEBSOCKET_KEY, SET_COOKIE, UPGRADE,
+    SEC_WEBSOCKET_KEY, SET_COOKIE, UPGRADE, USER_AGENT,
 };
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
 use futures_util::StreamExt;
@@ -60,6 +60,14 @@ pub async fn proxy_handler(
     forward_http(state, route, request).await
 }
 
+fn upstream_authority(route: &MatchedRoute) -> String {
+    if route.upstream_port == route.upstream_scheme.default_port() {
+        route.upstream_host.clone()
+    } else {
+        format!("{}:{}", route.upstream_host, route.upstream_port)
+    }
+}
+
 async fn forward_http(
     state: Arc<ProxyState>,
     route: MatchedRoute,
@@ -70,16 +78,35 @@ async fn forward_http(
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/");
-    let upstream_uri: Uri = format!("http://{}{}", route.upstream_host, path_and_query)
-        .parse()
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    let port_suffix = if route.upstream_port == route.upstream_scheme.default_port() {
+        String::new()
+    } else {
+        format!(":{}", route.upstream_port)
+    };
+    let upstream_uri: Uri = format!(
+        "{}://{}{}{}",
+        route.upstream_scheme.as_str(),
+        route.upstream_host,
+        port_suffix,
+        path_and_query
+    )
+    .parse()
+    .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
 
     let (mut parts, body) = request.into_parts();
     parts.uri = upstream_uri;
-    parts
-        .headers
-        .insert(HOST, HeaderValue::from_str(&route.upstream_host).unwrap());
+    let upstream_authority = upstream_authority(&route);
+    parts.headers.insert(
+        HOST,
+        HeaderValue::from_str(&upstream_authority)
+            .map_err(|err| AppError::Config(format!("invalid upstream host header: {err}")))?,
+    );
     rewrite_request_headers(&mut parts.headers, &route);
+    if let Some(user_agent) = &route.user_agent {
+        let value = HeaderValue::from_str(user_agent)
+            .map_err(|err| AppError::Config(format!("invalid user_agent header: {err}")))?;
+        parts.headers.insert(USER_AGENT, value);
+    }
     remove_hop_by_hop_headers(&mut parts.headers, false);
 
     let upstream_request = Request::from_parts(parts, body);
@@ -93,10 +120,16 @@ async fn forward_http(
                 let host = uri
                     .host()
                     .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing upstream host")))?;
-                let port = uri.port_u16().unwrap_or(80);
+                let port = uri.port_u16().unwrap_or(route.upstream_port);
                 let stream = connector
                     .connect(route.upstream_proxy.as_deref(), host, port)
                     .await?;
+                let stream = maybe_tls_stream(
+                    stream,
+                    host,
+                    matches!(route.upstream_scheme, UpstreamScheme::Https),
+                )
+                .await?;
                 Ok(boxed_body_io(stream))
             });
         future
@@ -121,16 +154,46 @@ async fn forward_websocket(
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/");
-    let upstream_url = format!("ws://{}{}", route.upstream_host, path_and_query);
+    let port_suffix = if route.upstream_port == route.upstream_scheme.default_port() {
+        String::new()
+    } else {
+        format!(":{}", route.upstream_port)
+    };
+    let upstream_url = format!(
+        "{}://{}{}{}",
+        match route.upstream_scheme {
+            UpstreamScheme::Http => "ws",
+            UpstreamScheme::Https => "wss",
+        },
+        route.upstream_host,
+        port_suffix,
+        path_and_query
+    );
     let mut upstream_request = upstream_url
         .into_client_request()
         .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
     let connector = UpstreamConnector::new(state.dns.clone());
     let upstream_proxy = route.upstream_proxy.clone();
     let upstream_host = route.upstream_host.clone();
-    upstream_request
-        .headers_mut()
-        .insert(HOST, HeaderValue::from_str(&route.upstream_host).unwrap());
+    let upstream_port = route.upstream_port;
+    let upstream_tls = matches!(route.upstream_scheme, UpstreamScheme::Https);
+    let user_agent = route.user_agent.clone();
+    let client_user_agent = request.headers().get(USER_AGENT).cloned();
+    let upstream_authority = upstream_authority(&route);
+    upstream_request.headers_mut().insert(
+        HOST,
+        HeaderValue::from_str(&upstream_authority)
+            .map_err(|err| AppError::Config(format!("invalid upstream host header: {err}")))?,
+    );
+    if let Some(user_agent) = &user_agent {
+        let value = HeaderValue::from_str(user_agent)
+            .map_err(|err| AppError::Config(format!("invalid user_agent header: {err}")))?;
+        upstream_request.headers_mut().insert(USER_AGENT, value);
+    } else if let Some(user_agent) = client_user_agent {
+        upstream_request
+            .headers_mut()
+            .insert(USER_AGENT, user_agent);
+    }
 
     let accept_key = request
         .headers()
@@ -144,9 +207,12 @@ async fn forward_websocket(
             return;
         };
         let Ok(stream) = connector
-            .connect(upstream_proxy.as_deref(), &upstream_host, 80)
+            .connect(upstream_proxy.as_deref(), &upstream_host, upstream_port)
             .await
         else {
+            return;
+        };
+        let Ok(stream) = maybe_tls_stream(stream, &upstream_host, upstream_tls).await else {
             return;
         };
         let Ok((upstream, _)) = tokio_tungstenite::client_async(upstream_request, stream).await

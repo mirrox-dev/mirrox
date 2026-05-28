@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "mirrox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1181,11 +1181,13 @@ dependencies = [
  "hyper-util",
  "once_cell",
  "portpicker",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-tungstenite",
  "toml",
  "tower",
@@ -1194,6 +1196,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "webpki-roots 0.26.11",
  "wiremock",
 ]
 

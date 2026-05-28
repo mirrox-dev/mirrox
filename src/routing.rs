@@ -1,4 +1,4 @@
-use crate::config::{normalize_host, AppConfig, BodyRewriteMode};
+use crate::config::{normalize_host, AppConfig, BodyRewriteMode, UpstreamScheme};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7,6 +7,9 @@ pub struct MatchedRoute {
     pub upstream_host: String,
     pub body_rewrite: BodyRewriteMode,
     pub upstream_proxy: Option<String>,
+    pub upstream_scheme: UpstreamScheme,
+    pub upstream_port: u16,
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +24,9 @@ struct WildcardRule {
     upstream_suffix: String,
     body_rewrite: BodyRewriteMode,
     upstream_proxy: Option<String>,
+    upstream_scheme: UpstreamScheme,
+    upstream_port: u16,
+    user_agent: Option<String>,
 }
 
 impl RouteTable {
@@ -33,6 +39,9 @@ impl RouteTable {
                     .body_rewrite
                     .clone()
                     .unwrap_or_else(|| config.rewrite.body.clone());
+                let upstream_port = route
+                    .upstream_port
+                    .unwrap_or_else(|| route.upstream_scheme.default_port());
                 let matched = MatchedRoute {
                     incoming_host: route.incoming.clone(),
                     upstream_host: route.upstream.clone(),
@@ -41,6 +50,9 @@ impl RouteTable {
                         .upstream_proxy
                         .clone()
                         .or_else(|| config.upstream_proxy.default.clone()),
+                    upstream_scheme: route.upstream_scheme.clone(),
+                    upstream_port,
+                    user_agent: route.user_agent.clone(),
                 };
                 (route.incoming.clone(), matched)
             })
@@ -49,17 +61,25 @@ impl RouteTable {
         let wildcard = config
             .wildcard_routes
             .iter()
-            .map(|route| WildcardRule {
-                incoming_suffix: route.incoming_suffix.clone(),
-                upstream_suffix: route.upstream_suffix.clone(),
-                body_rewrite: route
-                    .body_rewrite
-                    .clone()
-                    .unwrap_or_else(|| config.rewrite.body.clone()),
-                upstream_proxy: route
-                    .upstream_proxy
-                    .clone()
-                    .or_else(|| config.upstream_proxy.default.clone()),
+            .map(|route| {
+                let upstream_port = route
+                    .upstream_port
+                    .unwrap_or_else(|| route.upstream_scheme.default_port());
+                WildcardRule {
+                    incoming_suffix: route.incoming_suffix.clone(),
+                    upstream_suffix: route.upstream_suffix.clone(),
+                    body_rewrite: route
+                        .body_rewrite
+                        .clone()
+                        .unwrap_or_else(|| config.rewrite.body.clone()),
+                    upstream_proxy: route
+                        .upstream_proxy
+                        .clone()
+                        .or_else(|| config.upstream_proxy.default.clone()),
+                    upstream_scheme: route.upstream_scheme.clone(),
+                    upstream_port,
+                    user_agent: route.user_agent.clone(),
+                }
             })
             .collect();
 
@@ -82,6 +102,9 @@ impl RouteTable {
                 upstream_host: format!("{}{}", prefix, rule.upstream_suffix),
                 body_rewrite: rule.body_rewrite.clone(),
                 upstream_proxy: rule.upstream_proxy.clone(),
+                upstream_scheme: rule.upstream_scheme.clone(),
+                upstream_port: rule.upstream_port,
+                user_agent: rule.user_agent.clone(),
             })
         })
     }

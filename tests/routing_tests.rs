@@ -1,4 +1,4 @@
-use mirrox::config::{AppConfig, BodyRewriteMode};
+use mirrox::config::{AppConfig, BodyRewriteMode, UpstreamScheme};
 use mirrox::routing::RouteTable;
 
 fn table() -> RouteTable {
@@ -25,6 +25,61 @@ fn table() -> RouteTable {
 }
 
 #[test]
+fn exact_route_carries_upstream_connection_settings_and_user_agent() {
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+        upstream_port = 8080
+        user_agent = "Mirrox-Test/1.0"
+    "#,
+    )
+    .unwrap();
+    let table = RouteTable::from_config(&config);
+
+    let route = table
+        .match_host("api.example.com")
+        .expect("route should match");
+
+    assert_eq!(route.upstream_scheme, UpstreamScheme::Http);
+    assert_eq!(route.upstream_port, 8080);
+    assert_eq!(route.user_agent.as_deref(), Some("Mirrox-Test/1.0"));
+}
+
+#[test]
+fn wildcard_route_carries_upstream_connection_settings_and_user_agent() {
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[wildcard_routes]]
+        incoming_suffix = ".example.com"
+        upstream_suffix = ".bgm.tv"
+        upstream_scheme = "http"
+        upstream_port = 8080
+        user_agent = "Mirrox-Wildcard/1.0"
+    "#,
+    )
+    .unwrap();
+    let table = RouteTable::from_config(&config);
+
+    let route = table
+        .match_host("api.example.com")
+        .expect("route should match");
+
+    assert_eq!(route.upstream_host, "api.bgm.tv");
+    assert_eq!(route.upstream_scheme, UpstreamScheme::Http);
+    assert_eq!(route.upstream_port, 8080);
+    assert_eq!(route.user_agent.as_deref(), Some("Mirrox-Wildcard/1.0"));
+}
+
+#[test]
 fn explicit_route_wins_over_wildcard() {
     let route = table()
         .match_host("www.example.com")
@@ -42,6 +97,8 @@ fn wildcard_maps_subdomain_suffix() {
     assert_eq!(route.incoming_host, "api.example.com");
     assert_eq!(route.upstream_host, "api.bgm.tv");
     assert_eq!(route.body_rewrite, BodyRewriteMode::Enabled);
+    assert_eq!(route.upstream_scheme, UpstreamScheme::Https);
+    assert_eq!(route.upstream_port, 443);
 }
 
 #[test]

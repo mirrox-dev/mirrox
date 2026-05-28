@@ -29,6 +29,30 @@ pub enum BodyRewriteMode {
     HttpOnly,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpstreamScheme {
+    Http,
+    #[default]
+    Https,
+}
+
+impl UpstreamScheme {
+    pub fn default_port(&self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https => 443,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -126,6 +150,10 @@ pub struct RouteConfig {
     pub upstream: String,
     pub body_rewrite: Option<BodyRewriteMode>,
     pub upstream_proxy: Option<String>,
+    #[serde(default)]
+    pub upstream_scheme: UpstreamScheme,
+    pub upstream_port: Option<u16>,
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +162,10 @@ pub struct WildcardRouteConfig {
     pub upstream_suffix: String,
     pub body_rewrite: Option<BodyRewriteMode>,
     pub upstream_proxy: Option<String>,
+    #[serde(default)]
+    pub upstream_scheme: UpstreamScheme,
+    pub upstream_port: Option<u16>,
+    pub user_agent: Option<String>,
 }
 
 impl AppConfig {
@@ -214,11 +246,13 @@ impl AppConfig {
             validate_upstream_proxy_value(proxy)?;
         }
         for route in &self.routes {
+            validate_upstream_port(route.upstream_port)?;
             if let Some(proxy) = &route.upstream_proxy {
                 validate_upstream_proxy_value(proxy)?;
             }
         }
         for route in &self.wildcard_routes {
+            validate_upstream_port(route.upstream_port)?;
             if let Some(proxy) = &route.upstream_proxy {
                 validate_upstream_proxy_value(proxy)?;
             }
@@ -257,6 +291,15 @@ fn normalize_proxy_override(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn validate_upstream_port(port: Option<u16>) -> Result<(), AppError> {
+    if matches!(port, Some(0)) {
+        return Err(AppError::Config(
+            "upstream_port must be between 1 and 65535".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_upstream_proxy_value(value: &str) -> Result<(), AppError> {

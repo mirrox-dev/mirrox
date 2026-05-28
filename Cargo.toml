@@ -1,6 +1,6 @@
 [package]
 name = "mirrox"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -32,6 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-rustls = "0.26"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 toml = "0.8"
 tower = { version = "0.5", features = ["util"] }
@@ -40,10 +41,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+webpki-roots = "0.26"
 
 [dev-dependencies]
 axum-test = "16"
 http-body-util = "0.1"
 portpicker = "0.1"
+rustls-pki-types = { version = "1", features = ["std"] }
 tempfile = "3"
 wiremock = "0.6"
