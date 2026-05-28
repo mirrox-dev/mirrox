@@ -39,6 +39,7 @@ async fn build_test_app(addr: SocketAddr, max_buffer_bytes: usize) -> Router {
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
     "#
     ))
     .unwrap();
@@ -65,6 +66,7 @@ async fn build_test_app_with_proxy(addr: SocketAddr, upstream_proxy: &str) -> Ro
         [[routes]]
         incoming = "api.example.com"
         upstream = "api.bgm.tv"
+        upstream_scheme = "http"
     "#
     ))
     .unwrap();
