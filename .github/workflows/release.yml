@@ -132,6 +132,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: mirrox-*
           merge-multiple: true
 
       - name: Create release notes file
