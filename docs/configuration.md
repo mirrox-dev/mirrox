@@ -105,14 +105,14 @@ Set `user_agent` on a route to replace the upstream request `User-Agent` header.
 
 ```toml
 [[wildcard_routes]]
-incoming_suffix = ".moecloud.tk"
+incoming_suffix = ".example.com"
 upstream_suffix = ".bgm.tv"
 upstream_scheme = "https"
 upstream_port = 443
 # user_agent = "Mirrox/0.1"
 ```
 
-Wildcard routes map a single-label subdomain prefix to another suffix. For example, `incoming_suffix = ".moecloud.tk"` with `upstream_suffix = ".bgm.tv"` maps `api.moecloud.tk` to `api.bgm.tv`. It only matches one label before the suffix, so `v1.api.moecloud.tk` is not matched by that wildcard route. Exact routes take priority over wildcard routes.
+Wildcard routes map a single-label subdomain prefix to another suffix. For example, `incoming_suffix = ".example.com"` with `upstream_suffix = ".bgm.tv"` maps `api.example.com` to `api.bgm.tv`. It only matches one label before the suffix, so `v1.api.example.com` is not matched by that wildcard route. Exact routes take priority over wildcard routes.
 
 Wildcard routes support the same upstream connection fields as exact routes: `upstream_scheme = "http"` or `"https"`, `upstream_port`, and `user_agent`. If omitted, wildcard upstreams also default to HTTPS on port `443` and preserve the client's `User-Agent`.
 

@@ -106,7 +106,7 @@ upstream_proxy = "http://user:pass@127.0.0.1:8080"
 user_agent = "Mozilla/5.0 (compatible; Mirrox)"
 
 [[wildcard_routes]]
-incoming_suffix = ".moecloud.tk"
+incoming_suffix = ".example.com"
 upstream_suffix = ".bgm.tv"
 upstream_scheme = "https"
 upstream_port = 443
@@ -120,7 +120,7 @@ Routes connect to upstreams with HTTPS on port `443` by default. Both exact `[[r
 
 If `user_agent` is omitted, Mirrox preserves the client's `User-Agent` header on the upstream request. If configured, Mirrox replaces the upstream request `User-Agent` with that value.
 
-Wildcard routes use a single-label multi-domain model: `incoming_suffix = ".moecloud.tk"` with `upstream_suffix = ".bgm.tv"` maps `api.moecloud.tk` to `api.bgm.tv`, but does not match deeper names such as `v1.api.moecloud.tk`.
+Wildcard routes use a single-label multi-domain model: `incoming_suffix = ".example.com"` with `upstream_suffix = ".bgm.tv"` maps `api.example.com` to `api.bgm.tv`, but does not match deeper names such as `v1.api.example.com`.
 
 ## Cloudflare Tunnel
 

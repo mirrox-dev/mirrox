@@ -105,14 +105,14 @@ body_rewrite = "http-only"
 
 ```toml
 [[wildcard_routes]]
-incoming_suffix = ".moecloud.tk"
+incoming_suffix = ".example.com"
 upstream_suffix = ".bgm.tv"
 upstream_scheme = "https"
 upstream_port = 443
 # user_agent = "Mirrox/0.1"
 ```
 
-通配后缀路由会把单级子域名前缀映射到另一个后缀。例如 `incoming_suffix = ".moecloud.tk"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.moecloud.tk` 映射到 `api.bgm.tv`。它只匹配后缀前的一个标签，因此 `v1.api.moecloud.tk` 不会被这条通配路由匹配。精确路由优先级高于通配后缀路由。
+通配后缀路由会把单级子域名前缀映射到另一个后缀。例如 `incoming_suffix = ".example.com"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.example.com` 映射到 `api.bgm.tv`。它只匹配后缀前的一个标签，因此 `v1.api.example.com` 不会被这条通配路由匹配。精确路由优先级高于通配后缀路由。
 
 通配路由支持与精确路由相同的上游连接字段：`upstream_scheme = "http"` 或 `"https"`、`upstream_port` 和 `user_agent`。省略时，通配路由的上游同样默认使用 HTTPS 443，并保留客户端的 `User-Agent`。
 

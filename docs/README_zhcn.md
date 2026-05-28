@@ -106,7 +106,7 @@ upstream_proxy = "http://user:pass@127.0.0.1:8080"
 user_agent = "Mozilla/5.0 (compatible; Mirrox)"
 
 [[wildcard_routes]]
-incoming_suffix = ".moecloud.tk"
+incoming_suffix = ".example.com"
 upstream_suffix = ".bgm.tv"
 upstream_scheme = "https"
 upstream_port = 443
@@ -120,7 +120,7 @@ upstream_port = 443
 
 省略 `user_agent` 时，Mirrox 会保留客户端请求中的 `User-Agent` 并转发给上游；配置该值时，Mirrox 会用配置值覆盖发往上游请求的 `User-Agent`。
 
-通配路由使用单级标签的多域名模型：`incoming_suffix = ".moecloud.tk"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.moecloud.tk` 映射到 `api.bgm.tv`，但不会匹配 `v1.api.moecloud.tk` 这类更深层级域名。
+通配路由使用单级标签的多域名模型：`incoming_suffix = ".example.com"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.example.com` 映射到 `api.bgm.tv`，但不会匹配 `v1.api.example.com` 这类更深层级域名。
 
 ## Cloudflare Tunnel
 
