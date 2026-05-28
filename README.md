@@ -93,19 +93,38 @@ max_buffer_bytes = 2097152
 [[routes]]
 incoming = "api.example.com"
 upstream = "api.bgm.tv"
+# Upstreams default to HTTPS on port 443. Override when needed:
+# upstream_scheme = "http"
+# upstream_port = 80
+# user_agent = "Mirrox/0.1"
 
 [[routes]]
 incoming = "www.example.com"
 upstream = "www.bgm.tv"
 body_rewrite = "http-only"
 upstream_proxy = "http://user:pass@127.0.0.1:8080"
+user_agent = "Mozilla/5.0 (compatible; Mirrox)"
 
 [[wildcard_routes]]
-incoming_suffix = ".mirror.example.com"
+incoming_suffix = ".moecloud.tk"
 upstream_suffix = ".bgm.tv"
+upstream_scheme = "https"
+upstream_port = 443
 ```
 
 See [docs/configuration.md](docs/configuration.md) for the full configuration reference.
+
+## Upstream connection settings
+
+Routes connect to upstreams with HTTPS on port `443` by default. Both exact `[[routes]]` and `[[wildcard_routes]]` can set `upstream_scheme = "http"` or `"https"`, `upstream_port`, and `user_agent`.
+
+If `user_agent` is omitted, Mirrox preserves the client's `User-Agent` header on the upstream request. If configured, Mirrox replaces the upstream request `User-Agent` with that value.
+
+Wildcard routes use a single-label multi-domain model: `incoming_suffix = ".moecloud.tk"` with `upstream_suffix = ".bgm.tv"` maps `api.moecloud.tk` to `api.bgm.tv`, but does not match deeper names such as `v1.api.moecloud.tk`.
+
+## Cloudflare Tunnel
+
+When Mirrox runs behind Cloudflare Tunnel, Cloudflare can route multiple public hostnames or a wildcard hostname to the same internal service, for example `http://mirrox:3000`. Cloudflare terminates public HTTPS, while Mirrox receives HTTP behind the proxy and chooses the upstream route from the incoming `Host` header.
 
 ## Rewrite model
 

@@ -93,19 +93,38 @@ max_buffer_bytes = 2097152
 [[routes]]
 incoming = "api.example.com"
 upstream = "api.bgm.tv"
+# 上游默认使用 HTTPS 和 443 端口；需要时可覆盖：
+# upstream_scheme = "http"
+# upstream_port = 80
+# user_agent = "Mirrox/0.1"
 
 [[routes]]
 incoming = "www.example.com"
 upstream = "www.bgm.tv"
 body_rewrite = "http-only"
 upstream_proxy = "http://user:pass@127.0.0.1:8080"
+user_agent = "Mozilla/5.0 (compatible; Mirrox)"
 
 [[wildcard_routes]]
-incoming_suffix = ".mirror.example.com"
+incoming_suffix = ".moecloud.tk"
 upstream_suffix = ".bgm.tv"
+upstream_scheme = "https"
+upstream_port = 443
 ```
 
 完整配置说明见 [configuration_zhcn.md](configuration_zhcn.md)。
+
+## 上游连接设置
+
+路由默认使用 HTTPS 连接上游的 `443` 端口。精确 `[[routes]]` 和 `[[wildcard_routes]]` 都可以设置 `upstream_scheme = "http"` 或 `"https"`、`upstream_port` 和 `user_agent`。
+
+省略 `user_agent` 时，Mirrox 会保留客户端请求中的 `User-Agent` 并转发给上游；配置该值时，Mirrox 会用配置值覆盖发往上游请求的 `User-Agent`。
+
+通配路由使用单级标签的多域名模型：`incoming_suffix = ".moecloud.tk"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.moecloud.tk` 映射到 `api.bgm.tv`，但不会匹配 `v1.api.moecloud.tk` 这类更深层级域名。
+
+## Cloudflare Tunnel
+
+Mirrox 部署在 Cloudflare Tunnel 后面时，Cloudflare 可以把多个公网 hostname 或一个通配 hostname 路由到同一个内部服务，例如 `http://mirrox:3000`。Cloudflare 负责公网 HTTPS 终止，Mirrox 在代理后方接收 HTTP，并根据传入的 `Host` 选择路由。
 
 ## 重写模型
 
