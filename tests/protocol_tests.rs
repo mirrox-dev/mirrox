@@ -371,7 +371,9 @@ async fn websocket_omitted_user_agent_preserves_client_header() {
 
     let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     socket
-        .send(tokio_tungstenite::tungstenite::Message::Text("ua-preserve".into()))
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "ua-preserve".into(),
+        ))
         .await
         .unwrap();
     let _ = socket.next().await.unwrap().unwrap();

@@ -190,7 +190,9 @@ async fn forward_websocket(
             .map_err(|err| AppError::Config(format!("invalid user_agent header: {err}")))?;
         upstream_request.headers_mut().insert(USER_AGENT, value);
     } else if let Some(user_agent) = client_user_agent {
-        upstream_request.headers_mut().insert(USER_AGENT, user_agent);
+        upstream_request
+            .headers_mut()
+            .insert(USER_AGENT, user_agent);
     }
 
     let accept_key = request
