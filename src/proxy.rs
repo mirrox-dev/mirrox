@@ -178,6 +178,7 @@ async fn forward_websocket(
     let upstream_port = route.upstream_port;
     let upstream_tls = matches!(route.upstream_scheme, UpstreamScheme::Https);
     let user_agent = route.user_agent.clone();
+    let client_user_agent = request.headers().get(USER_AGENT).cloned();
     let upstream_authority = upstream_authority(&route);
     upstream_request.headers_mut().insert(
         HOST,
@@ -188,6 +189,8 @@ async fn forward_websocket(
         let value = HeaderValue::from_str(user_agent)
             .map_err(|err| AppError::Config(format!("invalid user_agent header: {err}")))?;
         upstream_request.headers_mut().insert(USER_AGENT, value);
+    } else if let Some(user_agent) = client_user_agent {
+        upstream_request.headers_mut().insert(USER_AGENT, user_agent);
     }
 
     let accept_key = request

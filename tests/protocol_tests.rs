@@ -339,6 +339,47 @@ async fn websocket_route_user_agent_overrides_client_header() {
 }
 
 #[tokio::test]
+async fn websocket_omitted_user_agent_preserves_client_header() {
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let upstream_app = Router::new()
+        .route("/*path", any(ws_seen_user_agent_upstream))
+        .with_state(seen.clone());
+    let upstream_addr = spawn_upstream(upstream_app).await;
+    let proxy_app = build_test_app_with_route_config(
+        upstream_addr,
+        r#"
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+    "#,
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, proxy_app).await.unwrap();
+    });
+    let url = format!("ws://{proxy_addr}/ua-preserve");
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("host", HeaderValue::from_static("api.example.com"));
+    request
+        .headers_mut()
+        .insert(USER_AGENT, HeaderValue::from_static("Client-WS/9.9"));
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text("ua-preserve".into()))
+        .await
+        .unwrap();
+    let _ = socket.next().await.unwrap().unwrap();
+
+    assert_eq!(seen.lock().await[0], "Client-WS/9.9");
+}
+
+#[tokio::test]
 async fn websocket_messages_are_proxied_through_http_upstream_proxy() {
     let upstream_app = Router::new().route("/*path", any(ws_upstream));
     let upstream_addr = spawn_upstream(upstream_app).await;
