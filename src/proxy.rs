@@ -60,6 +60,14 @@ pub async fn proxy_handler(
     forward_http(state, route, request).await
 }
 
+fn upstream_authority(route: &MatchedRoute) -> String {
+    if route.upstream_port == route.upstream_scheme.default_port() {
+        route.upstream_host.clone()
+    } else {
+        format!("{}:{}", route.upstream_host, route.upstream_port)
+    }
+}
+
 async fn forward_http(
     state: Arc<ProxyState>,
     route: MatchedRoute,
@@ -87,9 +95,12 @@ async fn forward_http(
 
     let (mut parts, body) = request.into_parts();
     parts.uri = upstream_uri;
-    parts
-        .headers
-        .insert(HOST, HeaderValue::from_str(&route.upstream_host).unwrap());
+    let upstream_authority = upstream_authority(&route);
+    parts.headers.insert(
+        HOST,
+        HeaderValue::from_str(&upstream_authority)
+            .map_err(|err| AppError::Config(format!("invalid upstream host header: {err}")))?,
+    );
     rewrite_request_headers(&mut parts.headers, &route);
     if let Some(user_agent) = &route.user_agent {
         let value = HeaderValue::from_str(user_agent)
@@ -167,9 +178,12 @@ async fn forward_websocket(
     let upstream_port = route.upstream_port;
     let upstream_tls = matches!(route.upstream_scheme, UpstreamScheme::Https);
     let user_agent = route.user_agent.clone();
-    upstream_request
-        .headers_mut()
-        .insert(HOST, HeaderValue::from_str(&route.upstream_host).unwrap());
+    let upstream_authority = upstream_authority(&route);
+    upstream_request.headers_mut().insert(
+        HOST,
+        HeaderValue::from_str(&upstream_authority)
+            .map_err(|err| AppError::Config(format!("invalid upstream host header: {err}")))?,
+    );
     if let Some(user_agent) = &user_agent {
         let value = HeaderValue::from_str(user_agent)
             .map_err(|err| AppError::Config(format!("invalid user_agent header: {err}")))?;

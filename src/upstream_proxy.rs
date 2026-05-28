@@ -168,13 +168,25 @@ pub fn boxed_body_io(stream: UpstreamStream) -> UpstreamIo {
     TokioIo::new(stream)
 }
 
+fn tls_root_store() -> Result<RootCertStore, AppError> {
+    let mut root_store = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    if let Ok(path) = std::env::var("MIRROX_EXTRA_ROOT_CERT_DER") {
+        let bytes =
+            std::fs::read(path).map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+        root_store
+            .add(bytes.into())
+            .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    }
+    Ok(root_store)
+}
+
 pub async fn tls_stream(
     stream: TcpStream,
     upstream_host: &str,
 ) -> Result<UpstreamStream, AppError> {
-    let root_store = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
+    let root_store = tls_root_store()?;
     let config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();

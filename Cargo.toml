@@ -47,5 +47,6 @@ webpki-roots = "0.26"
 axum-test = "16"
 http-body-util = "0.1"
 portpicker = "0.1"
+rustls-pki-types = { version = "1", features = ["std"] }
 tempfile = "3"
 wiremock = "0.6"

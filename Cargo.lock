@@ -1181,6 +1181,7 @@ dependencies = [
  "hyper-util",
  "once_cell",
  "portpicker",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tempfile",

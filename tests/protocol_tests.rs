@@ -1,6 +1,6 @@
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, USER_AGENT};
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Sse};
 use axum::routing::any;
@@ -132,6 +132,20 @@ async fn ws_seen_user_agent_upstream(
     upgrade.on_upgrade(echo_websocket)
 }
 
+async fn ws_seen_host_upstream(
+    State(seen): State<Arc<tokio::sync::Mutex<Vec<String>>>>,
+    upgrade: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let host = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    seen.lock().await.push(host);
+    upgrade.on_upgrade(echo_websocket)
+}
+
 async fn echo_websocket(mut socket: WebSocket) {
     while let Some(Ok(message)) = socket.recv().await {
         if socket.send(message).await.is_err() {
@@ -233,7 +247,10 @@ async fn spawn_http_connect_proxy_for_ws(target: SocketAddr) -> (SocketAddr, Arc
 
 #[tokio::test]
 async fn websocket_uses_http_custom_upstream_port() {
-    let upstream_app = Router::new().route("/*path", any(ws_upstream));
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let upstream_app = Router::new()
+        .route("/*path", any(ws_seen_host_upstream))
+        .with_state(seen.clone());
     let upstream_addr = spawn_upstream(upstream_app).await;
     let proxy_app = build_test_app_with_route_config(
         upstream_addr,
@@ -269,6 +286,10 @@ async fn websocket_uses_http_custom_upstream_port() {
         .unwrap();
     let message = socket.next().await.unwrap().unwrap();
 
+    assert_eq!(
+        seen.lock().await[0],
+        format!("api.bgm.tv:{}", upstream_addr.port())
+    );
     assert_eq!(
         message,
         tokio_tungstenite::tungstenite::Message::Text("custom-port".into())
