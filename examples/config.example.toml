@@ -1,0 +1,38 @@
+[server]
+listen = "127.0.0.1:3000"
+mode = "behind-proxy"
+# Direct mode fields are reserved for deployments where this process binds public ports.
+http_listen = "0.0.0.0:80"
+https_listen = "0.0.0.0:443"
+# tls_cert = "/etc/letsencrypt/live/proxy.example.com/fullchain.pem"
+# tls_key = "/etc/letsencrypt/live/proxy.example.com/privkey.pem"
+
+[dns]
+mode = "doh"
+servers = ["https://cloudflare-dns.com/dns-query"]
+cache_min_ttl_seconds = 30
+cache_max_ttl_seconds = 300
+timeout_ms = 2000
+
+[upstream_proxy]
+# Use "direct" or omit this table for direct upstream connections.
+# Supported schemes: http://, socks5://, with optional user:pass credentials.
+default = "direct"
+
+[rewrite]
+body = "enabled"
+max_buffer_bytes = 2097152
+
+[[routes]]
+incoming = "api.example.com"
+upstream = "api.bgm.tv"
+
+[[routes]]
+incoming = "www.example.com"
+upstream = "www.bgm.tv"
+body_rewrite = "http-only"
+upstream_proxy = "http://user:pass@127.0.0.1:8080"
+
+[[wildcard_routes]]
+incoming_suffix = ".mirror.example.com"
+upstream_suffix = ".bgm.tv"

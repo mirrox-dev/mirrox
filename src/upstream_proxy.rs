@@ -1,0 +1,300 @@
+use crate::dns::SharedDnsResolver;
+use crate::error::AppError;
+use base64::Engine;
+use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyTarget {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyMode {
+    Direct,
+    HttpConnect(ProxyTarget),
+    Socks5(ProxyTarget),
+}
+
+impl ProxyMode {
+    pub fn parse(value: Option<&str>) -> Result<Self, AppError> {
+        let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(Self::Direct);
+        };
+        if value.eq_ignore_ascii_case("direct") {
+            return Ok(Self::Direct);
+        }
+
+        let url = url::Url::parse(value)
+            .map_err(|err| AppError::Config(format!("invalid upstream proxy {value}: {err}")))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| {
+                AppError::Config(format!("invalid upstream proxy {value}: missing host"))
+            })?
+            .to_string();
+        let port = url.port_or_known_default().ok_or_else(|| {
+            AppError::Config(format!("invalid upstream proxy {value}: missing port"))
+        })?;
+        let username = if url.username().is_empty() {
+            None
+        } else {
+            Some(url.username().to_string())
+        };
+        let password = url.password().map(ToOwned::to_owned);
+        let target = ProxyTarget {
+            host,
+            port,
+            username,
+            password,
+        };
+
+        match url.scheme() {
+            "http" => Ok(Self::HttpConnect(target)),
+            "socks5" => Ok(Self::Socks5(target)),
+            scheme => Err(AppError::Config(format!(
+                "invalid upstream proxy scheme: {scheme}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct UpstreamConnector {
+    dns: SharedDnsResolver,
+}
+
+impl UpstreamConnector {
+    pub fn new(dns: SharedDnsResolver) -> Self {
+        Self { dns }
+    }
+
+    pub async fn connect(
+        &self,
+        proxy: Option<&str>,
+        upstream_host: &str,
+        upstream_port: u16,
+    ) -> Result<TcpStream, AppError> {
+        match ProxyMode::parse(proxy)? {
+            ProxyMode::Direct => self.connect_direct(upstream_host, upstream_port).await,
+            ProxyMode::HttpConnect(proxy) => {
+                connect_http_proxy(proxy, upstream_host, upstream_port).await
+            }
+            ProxyMode::Socks5(proxy) => {
+                connect_socks5_proxy(proxy, upstream_host, upstream_port).await
+            }
+        }
+    }
+
+    async fn connect_direct(&self, host: &str, port: u16) -> Result<TcpStream, AppError> {
+        let addresses = self.dns.resolve(host, port).await?;
+        TcpStream::connect(addresses[0])
+            .await
+            .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))
+    }
+}
+
+pub type UpstreamIo = TokioIo<TcpStream>;
+
+pub fn boxed_body_io(stream: TcpStream) -> UpstreamIo {
+    TokioIo::new(stream)
+}
+
+async fn connect_proxy_tcp(proxy: &ProxyTarget) -> Result<TcpStream, AppError> {
+    let addr = format!("{}:{}", proxy.host, proxy.port);
+    TcpStream::connect(addr)
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))
+}
+
+async fn connect_http_proxy(
+    proxy: ProxyTarget,
+    upstream_host: &str,
+    upstream_port: u16,
+) -> Result<TcpStream, AppError> {
+    let mut stream = connect_proxy_tcp(&proxy).await?;
+    let authority = format!("{upstream_host}:{upstream_port}");
+    let mut request = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n"
+    );
+    if let Some(username) = &proxy.username {
+        let password = proxy.password.as_deref().unwrap_or("");
+        let credentials =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        request.push_str(&format!("Proxy-Authorization: Basic {credentials}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+
+    let mut response = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        let read = stream
+            .read(&mut byte)
+            .await
+            .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+        if read == 0 {
+            return Err(AppError::Upstream(anyhow::anyhow!(
+                "http proxy closed during CONNECT"
+            )));
+        }
+        response.push(byte[0]);
+        if response.len() > 8192 {
+            return Err(AppError::Upstream(anyhow::anyhow!(
+                "http proxy CONNECT response too large"
+            )));
+        }
+    }
+    let response = String::from_utf8_lossy(&response);
+    if response.starts_with("HTTP/1.1 2") || response.starts_with("HTTP/1.0 2") {
+        Ok(stream)
+    } else {
+        Err(AppError::Upstream(anyhow::anyhow!(
+            "http proxy CONNECT failed: {response}"
+        )))
+    }
+}
+
+async fn connect_socks5_proxy(
+    proxy: ProxyTarget,
+    upstream_host: &str,
+    upstream_port: u16,
+) -> Result<TcpStream, AppError> {
+    let mut stream = connect_proxy_tcp(&proxy).await?;
+    let wants_auth = proxy.username.is_some();
+    let greeting: &[u8] = if wants_auth {
+        &[0x05, 0x02, 0x00, 0x02]
+    } else {
+        &[0x05, 0x01, 0x00]
+    };
+    stream
+        .write_all(greeting)
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    let mut method = [0_u8; 2];
+    stream
+        .read_exact(&mut method)
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    if method[0] != 0x05 {
+        return Err(AppError::Upstream(anyhow::anyhow!(
+            "invalid SOCKS5 proxy response"
+        )));
+    }
+    match method[1] {
+        0x00 => {}
+        0x02 => authenticate_socks5(&mut stream, &proxy).await?,
+        0xff => {
+            return Err(AppError::Upstream(anyhow::anyhow!(
+                "SOCKS5 proxy rejected auth methods"
+            )))
+        }
+        other => {
+            return Err(AppError::Upstream(anyhow::anyhow!(
+                "unsupported SOCKS5 auth method {other}"
+            )))
+        }
+    }
+
+    let host = upstream_host.as_bytes();
+    if host.len() > u8::MAX as usize {
+        return Err(AppError::Upstream(anyhow::anyhow!(
+            "SOCKS5 upstream host too long"
+        )));
+    }
+    let mut request = Vec::with_capacity(7 + host.len());
+    request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host.len() as u8]);
+    request.extend_from_slice(host);
+    request.extend_from_slice(&upstream_port.to_be_bytes());
+    stream
+        .write_all(&request)
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+
+    let mut header = [0_u8; 4];
+    stream
+        .read_exact(&mut header)
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    if header[0] != 0x05 || header[1] != 0x00 {
+        return Err(AppError::Upstream(anyhow::anyhow!("SOCKS5 CONNECT failed")));
+    }
+    read_socks5_bound_address(&mut stream, header[3]).await?;
+    Ok(stream)
+}
+
+async fn authenticate_socks5(stream: &mut TcpStream, proxy: &ProxyTarget) -> Result<(), AppError> {
+    let username = proxy.username.as_deref().unwrap_or("").as_bytes();
+    let password = proxy.password.as_deref().unwrap_or("").as_bytes();
+    if username.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
+        return Err(AppError::Upstream(anyhow::anyhow!(
+            "SOCKS5 credentials too long"
+        )));
+    }
+    let mut request = Vec::with_capacity(3 + username.len() + password.len());
+    request.push(0x01);
+    request.push(username.len() as u8);
+    request.extend_from_slice(username);
+    request.push(password.len() as u8);
+    request.extend_from_slice(password);
+    stream
+        .write_all(&request)
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    let mut response = [0_u8; 2];
+    stream
+        .read_exact(&mut response)
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    if response == [0x01, 0x00] {
+        Ok(())
+    } else {
+        Err(AppError::Upstream(anyhow::anyhow!(
+            "SOCKS5 authentication failed"
+        )))
+    }
+}
+
+async fn read_socks5_bound_address(stream: &mut TcpStream, atyp: u8) -> Result<(), AppError> {
+    match atyp {
+        0x01 => {
+            let mut ignored = [0_u8; 6];
+            stream
+                .read_exact(&mut ignored)
+                .await
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+        }
+        0x03 => {
+            let mut len = [0_u8; 1];
+            stream
+                .read_exact(&mut len)
+                .await
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+            let mut ignored = vec![0_u8; len[0] as usize + 2];
+            stream
+                .read_exact(&mut ignored)
+                .await
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+        }
+        0x04 => {
+            let mut ignored = [0_u8; 18];
+            stream
+                .read_exact(&mut ignored)
+                .await
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+        }
+        other => {
+            return Err(AppError::Upstream(anyhow::anyhow!(
+                "unsupported SOCKS5 address type {other}"
+            )))
+        }
+    }
+    Ok(())
+}

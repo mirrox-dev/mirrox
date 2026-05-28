@@ -1,0 +1,49 @@
+[package]
+name = "mirrox"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "mirrox"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mirrox"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["ws"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls", "dns-over-rustls", "tokio-runtime"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
+hyper-rustls = { version = "0.27", features = ["http1", "http2", "native-tokio", "tls12"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "server", "tokio"] }
+once_cell = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "request-id", "util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+axum-test = "16"
+http-body-util = "0.1"
+portpicker = "0.1"
+tempfile = "3"
+wiremock = "0.6"

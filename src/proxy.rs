@@ -1,0 +1,285 @@
+use crate::config::{AppConfig, BodyRewriteMode};
+use crate::dns::SharedDnsResolver;
+use crate::error::AppError;
+use crate::rewrite::{
+    is_rewritable_content_type, registrable_suffix, rewrite_cookie_domain, rewrite_header_value,
+    rewrite_text_body,
+};
+use crate::routing::{MatchedRoute, RouteTable};
+use crate::upstream_proxy::{boxed_body_io, UpstreamConnector};
+use axum::body::{to_bytes, Body};
+use axum::extract::State;
+use axum::http::header::{
+    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, SEC_WEBSOCKET_ACCEPT,
+    SEC_WEBSOCKET_KEY, SET_COOKIE, UPGRADE,
+};
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
+use futures_util::StreamExt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
+use tower::service_fn;
+
+#[derive(Clone)]
+pub struct ProxyState {
+    pub config: AppConfig,
+    pub routes: RouteTable,
+    pub dns: SharedDnsResolver,
+}
+
+impl ProxyState {
+    pub fn new(config: AppConfig, routes: RouteTable, dns: SharedDnsResolver) -> Self {
+        Self {
+            config,
+            routes,
+            dns,
+        }
+    }
+}
+
+pub async fn proxy_handler(
+    State(state): State<Arc<ProxyState>>,
+    request: Request<Body>,
+) -> Result<Response<Body>, AppError> {
+    let host = request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::RouteNotFound("missing host".into()))?;
+    let route = state
+        .routes
+        .match_host(host)
+        .ok_or_else(|| AppError::RouteNotFound(host.to_string()))?;
+
+    if is_websocket_upgrade(request.headers()) {
+        return forward_websocket(state, route, request).await;
+    }
+
+    forward_http(state, route, request).await
+}
+
+async fn forward_http(
+    state: Arc<ProxyState>,
+    route: MatchedRoute,
+    request: Request<Body>,
+) -> Result<Response<Body>, AppError> {
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let upstream_uri: Uri = format!("http://{}{}", route.upstream_host, path_and_query)
+        .parse()
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+
+    let (mut parts, body) = request.into_parts();
+    parts.uri = upstream_uri;
+    parts
+        .headers
+        .insert(HOST, HeaderValue::from_str(&route.upstream_host).unwrap());
+    rewrite_request_headers(&mut parts.headers, &route);
+    remove_hop_by_hop_headers(&mut parts.headers, false);
+
+    let upstream_request = Request::from_parts(parts, body);
+    let connector = UpstreamConnector::new(state.dns.clone());
+    let route_for_connect = route.clone();
+    let service = service_fn(move |uri: Uri| {
+        let connector = connector.clone();
+        let route = route_for_connect.clone();
+        let future: Pin<Box<dyn Future<Output = Result<_, AppError>> + Send>> =
+            Box::pin(async move {
+                let host = uri
+                    .host()
+                    .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing upstream host")))?;
+                let port = uri.port_u16().unwrap_or(80);
+                let stream = connector
+                    .connect(route.upstream_proxy.as_deref(), host, port)
+                    .await?;
+                Ok(boxed_body_io(stream))
+            });
+        future
+    });
+    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+        .build::<_, Body>(service);
+    let upstream_response = client
+        .request(upstream_request)
+        .await
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+
+    rewrite_response(state, route, upstream_response).await
+}
+
+async fn forward_websocket(
+    state: Arc<ProxyState>,
+    route: MatchedRoute,
+    request: Request<Body>,
+) -> Result<Response<Body>, AppError> {
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let upstream_url = format!("ws://{}{}", route.upstream_host, path_and_query);
+    let mut upstream_request = upstream_url
+        .into_client_request()
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    let connector = UpstreamConnector::new(state.dns.clone());
+    let upstream_proxy = route.upstream_proxy.clone();
+    let upstream_host = route.upstream_host.clone();
+    upstream_request
+        .headers_mut()
+        .insert(HOST, HeaderValue::from_str(&route.upstream_host).unwrap());
+
+    let accept_key = request
+        .headers()
+        .get(SEC_WEBSOCKET_KEY)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| derive_accept_key(value.as_bytes()))
+        .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing Sec-WebSocket-Key")))?;
+    let upgraded = hyper::upgrade::on(request);
+    tokio::spawn(async move {
+        let Ok(client) = upgraded.await else {
+            return;
+        };
+        let Ok(stream) = connector
+            .connect(upstream_proxy.as_deref(), &upstream_host, 80)
+            .await
+        else {
+            return;
+        };
+        let Ok((upstream, _)) = tokio_tungstenite::client_async(upstream_request, stream).await
+        else {
+            return;
+        };
+        let client = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            hyper_util::rt::TokioIo::new(client),
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        let (client_sink, client_stream) = client.split();
+        let (upstream_sink, upstream_stream) = upstream.split();
+        let client_to_upstream = client_stream.forward(upstream_sink);
+        let upstream_to_client = upstream_stream.forward(client_sink);
+        let _ = tokio::join!(client_to_upstream, upstream_to_client);
+    });
+
+    Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(CONNECTION, "upgrade")
+        .header(UPGRADE, "websocket")
+        .header(SEC_WEBSOCKET_ACCEPT, accept_key)
+        .body(Body::empty())
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))
+}
+
+async fn rewrite_response(
+    state: Arc<ProxyState>,
+    route: MatchedRoute,
+    response: Response<hyper::body::Incoming>,
+) -> Result<Response<Body>, AppError> {
+    let (mut parts, body) = response.into_parts();
+    rewrite_response_headers(&mut parts.headers, &route);
+
+    let content_type = parts
+        .headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let should_rewrite_body =
+        route.body_rewrite == BodyRewriteMode::Enabled && is_rewritable_content_type(content_type);
+    let content_length = parts
+        .headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+
+    if !should_rewrite_body
+        || content_length.is_some_and(|length| length > state.config.rewrite.max_buffer_bytes)
+    {
+        let body = Body::new(http_body_util::BodyExt::boxed(body));
+        return Ok(Response::from_parts(parts, body));
+    }
+
+    let bytes = to_bytes(
+        Body::new(http_body_util::BodyExt::boxed(body)),
+        state.config.rewrite.max_buffer_bytes,
+    )
+    .await
+    .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let rewritten = rewrite_text_body(&text, &route.upstream_host, &route.incoming_host);
+    parts.headers.remove(CONTENT_LENGTH);
+    Ok(Response::from_parts(parts, Body::from(rewritten)))
+}
+
+fn rewrite_request_headers(headers: &mut HeaderMap, route: &MatchedRoute) {
+    for name in ["origin", "referer"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            let rewritten = rewrite_header_value(value, &route.incoming_host, &route.upstream_host);
+            if let Ok(value) = HeaderValue::from_str(&rewritten) {
+                headers.insert(name, value);
+            }
+        }
+    }
+}
+
+fn rewrite_response_headers(headers: &mut HeaderMap, route: &MatchedRoute) {
+    if let Some(value) = headers.get(LOCATION).and_then(|value| value.to_str().ok()) {
+        let rewritten = rewrite_header_value(value, &route.upstream_host, &route.incoming_host);
+        if let Ok(value) = HeaderValue::from_str(&rewritten) {
+            headers.insert(LOCATION, value);
+        }
+    }
+
+    let upstream_suffix = registrable_suffix(&route.upstream_host).to_string();
+    let incoming_suffix = registrable_suffix(&route.incoming_host).to_string();
+    let cookies: Vec<_> = headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| rewrite_cookie_domain(value, &upstream_suffix, &incoming_suffix))
+        .collect();
+    if !cookies.is_empty() {
+        headers.remove(SET_COOKIE);
+        for cookie in cookies {
+            if let Ok(value) = HeaderValue::from_str(&cookie) {
+                headers.append(SET_COOKIE, value);
+            }
+        }
+    }
+}
+
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+        && headers
+            .get(CONNECTION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .to_ascii_lowercase()
+                    .split(',')
+                    .any(|part| part.trim() == "upgrade")
+            })
+}
+
+fn remove_hop_by_hop_headers(headers: &mut HeaderMap, is_upgrade: bool) {
+    for name in [
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+    ] {
+        headers.remove(name);
+    }
+    if !is_upgrade {
+        headers.remove("upgrade");
+    }
+}
