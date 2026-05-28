@@ -76,10 +76,7 @@ fn wildcard_route_carries_upstream_connection_settings_and_user_agent() {
     assert_eq!(route.upstream_host, "api.bgm.tv");
     assert_eq!(route.upstream_scheme, UpstreamScheme::Http);
     assert_eq!(route.upstream_port, 8080);
-    assert_eq!(
-        route.user_agent.as_deref(),
-        Some("Mirrox-Wildcard/1.0")
-    );
+    assert_eq!(route.user_agent.as_deref(), Some("Mirrox-Wildcard/1.0"));
 }
 
 #[test]

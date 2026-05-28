@@ -1,9 +1,14 @@
 use crate::dns::SharedDnsResolver;
 use crate::error::AppError;
 use base64::Engine;
+use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::{client::TlsStream, TlsConnector};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyTarget {
@@ -98,10 +103,104 @@ impl UpstreamConnector {
     }
 }
 
-pub type UpstreamIo = TokioIo<TcpStream>;
+pub enum UpstreamStream {
+    Plain(TcpStream),
+    Tls(TlsStream<TcpStream>),
+}
 
-pub fn boxed_body_io(stream: TcpStream) -> UpstreamIo {
+impl AsyncRead for UpstreamStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for UpstreamStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match &mut *self {
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+impl Unpin for UpstreamStream {}
+
+impl Connection for UpstreamStream {
+    fn connected(&self) -> Connected {
+        Connected::new()
+    }
+}
+
+pub type UpstreamIo = TokioIo<UpstreamStream>;
+
+pub fn boxed_body_io(stream: UpstreamStream) -> UpstreamIo {
     TokioIo::new(stream)
+}
+
+pub async fn tls_stream(
+    stream: TcpStream,
+    upstream_host: &str,
+) -> Result<UpstreamStream, AppError> {
+    let root_store = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let server_name = ServerName::try_from(upstream_host.to_string()).map_err(|err| {
+        AppError::Upstream(anyhow::anyhow!(
+            "invalid TLS server name {upstream_host}: {err}"
+        ))
+    })?;
+    connector
+        .connect(server_name, stream)
+        .await
+        .map(UpstreamStream::Tls)
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))
+}
+
+pub async fn maybe_tls_stream(
+    stream: TcpStream,
+    upstream_host: &str,
+    use_tls: bool,
+) -> Result<UpstreamStream, AppError> {
+    if use_tls {
+        tls_stream(stream, upstream_host).await
+    } else {
+        Ok(UpstreamStream::Plain(stream))
+    }
 }
 
 async fn connect_proxy_tcp(proxy: &ProxyTarget) -> Result<TcpStream, AppError> {
