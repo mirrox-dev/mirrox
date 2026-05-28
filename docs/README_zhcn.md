@@ -1,28 +1,29 @@
 # Mirrox
 
-Mirrox 是一个使用 Rust 编写的可配置反向代理，用于在不把域名规则硬编码进程序的情况下发布镜像域名。它会把你控制的入口域名映射到 `config.toml` 中配置的上游域名，并重写 HTTP 头和受支持的响应正文，让链接保持在镜像域名下；未配置的 Host 会返回 `421 Misdirected Request`。
+Mirrox 是一个使用 Rust 编写的高性能可配置反向代理，用于发布受控镜像域名。它会把你控制的入口域名映射到 TOML 配置文件中声明的上游域名，并重写 HTTP 层数据和受支持的响应正文，让链接保持在镜像域名下；未配置的 Host 会被拒绝，避免服务变成开放代理。
+
+Mirrox 适合自托管镜像网关、私有域名前置，以及需要显式 host-to-upstream 路由且不希望每次修改域名规则都重新编译程序的部署场景。
 
 仓库：<https://github.com/mirrox-dev/mirrox>
 
-## 功能
+## 特性
 
-- 精确域名映射和通配后缀映射。
-- 严格的入口域名白名单；未知 Host 返回 `421 Misdirected Request`。
-- HTTP 转发，并替换上游请求的 `Host`。
-- 重写请求头中的 `Origin` 和 `Referer`。
-- 重写响应中的 `Location`、`Set-Cookie Domain` 和文本响应体。
-- 支持按路由切换为仅 HTTP 层重写。
-- SSE 和超大响应透传，避免不必要的缓冲。
-- 支持 WebSocket 升级连接透传。
-- 出站连接可选使用 HTTP CONNECT 或 SOCKS5 上游代理。
-- 优先使用配置文件，并支持 CLI 参数和环境变量覆盖。
-- GHCR 发布 `linux/amd64` 和 `linux/arm64` Docker 镜像。
+- **配置文件优先路由**：在 `config.toml` 中定义精确域名映射和通配后缀映射。
+- **严格 Host 白名单**：未配置 `Host` 的请求返回 `421 Misdirected Request`。
+- **HTTP 重写支持**：重写上游 `Host`、请求 `Origin` / `Referer`、响应 `Location` 和 Cookie Domain。
+- **可选响应体重写**：重写低于缓冲限制的 HTML、CSS、JavaScript 和 JSON 响应体。
+- **面向流式传输的行为**：SSE、超大响应和非文本资源会透传，避免不必要的缓冲。
+- **WebSocket 支持**：代理升级后的 WebSocket 连接。
+- **出站代理支持**：上游连接可直连，也可通过 HTTP CONNECT / SOCKS5 代理。
+- **便于部署**：支持 CLI 配置选择、环境变量覆盖、Docker 和 GitHub Release 二进制文件。
 
 ## 当前状态
 
-项目已经具备基础功能，但仍处于早期阶段。DNS 配置模型支持 `udp`、`tcp`、`dot` 和 `doh`，代码中也已经有 resolver 抽象；不过当前 resolver 实现仍通过 Tokio 系统 DNS 解析。自定义 DoH/DoT 服务器的强制使用需要后续补齐后，才建议在生产中依赖。
+Mirrox 已经可用，但仍处于早期阶段。DNS 配置模型接受 `udp`、`tcp`、`dot` 和 `doh`，代码中也包含 resolver 抽象。当前 resolver 实现仍通过 Tokio 系统 DNS 解析，因此在相关逻辑完成前，不建议依赖自定义 DoH/DoT 服务器的强制使用。
 
 ## 快速开始
+
+从示例创建配置文件并运行代理：
 
 ```bash
 cp examples/config.example.toml config.toml
@@ -44,11 +45,9 @@ mirrox --config /etc/mirrox/config.toml
 2. `MIRROX_CONFIG`
 3. `config.toml`
 
-环境变量仍然保留，便于 Docker 部署和简单覆盖。
-
 ## Docker
 
-拉取公开镜像：
+发布镜像生成后，可以从 GHCR 拉取：
 
 ```bash
 docker pull ghcr.io/mirrox-dev/mirrox:latest
@@ -108,14 +107,14 @@ upstream_suffix = ".bgm.tv"
 
 完整配置说明见 [configuration_zhcn.md](configuration_zhcn.md)。
 
-## 重写模式
+## 重写模型
 
-默认情况下，代理会同时重写 HTTP 层数据和支持的文本响应体：
+Mirrox 有两层重写：
 
-- HTTP 层：`Host`、`Origin`、`Referer`、`Location` 和 Cookie Domain。
-- 响应体层：小于 `max_buffer_bytes` 的 HTML、CSS、JavaScript 和 JSON 响应。
+- **HTTP 层**：请求 `Host`、`Origin`、`Referer`；响应 `Location`；Cookie `Domain` 属性。
+- **响应体层**：低于 `max_buffer_bytes` 的 HTML、CSS、JavaScript 和 JSON 等文本响应。
 
-`MIRROX_REWRITE_BODY` 默认是 `enabled`。可以在路由上设置 `body_rewrite = "http-only"`，或设置 `MIRROX_REWRITE_BODY=http-only`，以关闭响应体重写但保留 HTTP 层重写。
+响应体重写默认启用。可以在路由上设置 `body_rewrite = "http-only"`，或设置 `MIRROX_REWRITE_BODY=http-only`，以关闭响应体重写但保留 HTTP 层重写。
 
 ## 环境变量
 
@@ -125,7 +124,7 @@ upstream_suffix = ".bgm.tv"
 | `MIRROX_LISTEN` | 覆盖 `[server].listen`。 |
 | `MIRROX_DNS_SERVERS` | 逗号分隔的 DNS 服务器列表。 |
 | `MIRROX_UPSTREAM_PROXY` | 覆盖上游代理模式；可使用 `direct`、`http://...` 或 `socks5://...`。 |
-| `MIRROX_REWRITE_BODY` | 覆盖正文重写模式；默认 `enabled`，设置为 `http-only` 可关闭正文重写。 |
+| `MIRROX_REWRITE_BODY` | 覆盖响应体重写模式；默认 `enabled`，设置为 `http-only` 可关闭响应体重写。 |
 
 ## 发布
 
@@ -136,7 +135,9 @@ git tag -a v0.1.0 -m "Release v0.1.0"
 git push origin v0.1.0
 ```
 
-镜像发布地址：
+发布 workflow 也接受 `0.1.0` 这样的无 `v` 前缀 semver tag。
+
+镜像发布后使用以下 tag：
 
 ```bash
 docker pull ghcr.io/mirrox-dev/mirrox:latest
@@ -156,4 +157,4 @@ cargo check
 
 ## 许可证
 
-MIT
+Mirrox 使用 [MIT License](../LICENSE) 授权。

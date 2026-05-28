@@ -1,39 +1,29 @@
+[简体中文](docs/README_zhcn.md)
+
 # Mirrox
 
-Mirrox is a configurable Rust reverse proxy for publishing mirror domains without hardcoding domain rules into the binary. It maps incoming hosts you control to upstream hosts defined in `config.toml`, rewrites HTTP headers and supported response content so links stay on the mirror domain, and rejects unknown hosts with `421 Misdirected Request`.
+Mirrox is a high-performance Rust reverse proxy for publishing controlled mirror domains. It maps incoming hosts you own to upstream hosts declared in a TOML configuration file, rewrites HTTP-layer values and supported response bodies so links stay on the mirror domain, and rejects unknown hosts instead of acting as an open proxy.
 
-Repository: <https://github.com/mirrox-dev/mirrox>
+Mirrox is designed for self-hosted mirror gateways, private domain fronting, and deployments that need explicit host-to-upstream routing without recompiling the proxy when domain rules change.
 
-## What it does
+## Highlights
 
-Mirrox is designed for self-hosted domain mirroring and controlled reverse-proxy deployments where each public domain maps to a known upstream domain. The configuration model supports exact host mappings and wildcard suffix mappings, so one proxy instance can serve several mirrored hosts while keeping routing explicit.
-
-Typical use cases include:
-
-- exposing a service through your own domain while preserving upstream host routing;
-- mirroring multiple upstream subdomains with wildcard suffix rules;
-- keeping request and response URLs consistent with the public mirror domain;
-- routing outbound traffic directly or through an HTTP CONNECT / SOCKS5 proxy.
-
-## Features
-
-- Exact and wildcard host mapping.
-- Strict configured-host allowlist; unknown hosts return `421 Misdirected Request`.
-- HTTP forwarding with upstream `Host` replacement.
-- Request header rewriting for `Origin` and `Referer`.
-- Response rewriting for `Location`, `Set-Cookie Domain`, and supported text bodies.
-- Per-route switch for HTTP-layer-only rewriting.
-- SSE and oversized response passthrough to avoid unnecessary buffering.
-- WebSocket passthrough for upgraded connections.
-- Optional HTTP CONNECT or SOCKS5 upstream proxy for outbound connections.
-- Config-file-first setup with CLI and environment variable overrides.
-- Docker images published to GHCR for `linux/amd64` and `linux/arm64`.
+- **Config-file-first routing**: define exact host mappings and wildcard suffix mappings in `config.toml`.
+- **Strict host allowlist**: requests for unconfigured `Host` values return `421 Misdirected Request`.
+- **HTTP rewrite support**: rewrites upstream `Host`, request `Origin` / `Referer`, response `Location`, and cookie domains.
+- **Optional body rewriting**: rewrites supported HTML, CSS, JavaScript, and JSON bodies below the configured buffer limit.
+- **Streaming-aware behavior**: passes through SSE, oversized responses, and non-text assets without unnecessary buffering.
+- **WebSocket support**: proxies upgraded WebSocket connections.
+- **Outbound proxy support**: connect to upstreams directly or through HTTP CONNECT / SOCKS5 proxies.
+- **Deployment friendly**: supports CLI config selection, environment overrides, Docker, and GitHub Release binaries.
 
 ## Current status
 
-Mirrox is functional but still early. The DNS configuration model supports `udp`, `tcp`, `dot`, and `doh`, and a resolver abstraction is in place; however, the current resolver implementation still uses Tokio system DNS internally. Do not rely on custom DoH/DoT server enforcement until that resolver wiring is completed.
+Mirrox is usable but still early. The DNS configuration model accepts `udp`, `tcp`, `dot`, and `doh`, and the codebase includes a resolver abstraction. The current resolver implementation still uses Tokio system DNS internally, so do not rely on custom DoH/DoT server enforcement until that wiring is completed.
 
 ## Quick start
+
+Create a config file from the example and run the proxy:
 
 ```bash
 cp examples/config.example.toml config.toml
@@ -42,24 +32,22 @@ cargo run --release -- -c config.toml
 
 The default server listens on `127.0.0.1:3000`.
 
-Use a specific config path:
+Use an explicit config path:
 
 ```bash
 mirrox -c /etc/mirrox/config.toml
 mirrox --config /etc/mirrox/config.toml
 ```
 
-Config path priority is:
+Config path priority:
 
 1. `-c, --config <PATH>`
 2. `MIRROX_CONFIG`
 3. `config.toml`
 
-Environment variables remain supported for container deployments and simple overrides.
-
 ## Docker
 
-Pull the public image:
+After a release image is published, pull it from GHCR:
 
 ```bash
 docker pull ghcr.io/mirrox-dev/mirrox:latest
@@ -71,7 +59,7 @@ Run with Docker Compose:
 docker compose up -d
 ```
 
-The included `docker-compose.yml` uses `ghcr.io/mirrox-dev/mirrox:latest` and mounts `./examples/config.example.toml` to `/etc/mirrox/config.toml`. For a real deployment, replace that mount source with your own config file.
+The included `docker-compose.yml` uses `ghcr.io/mirrox-dev/mirrox:latest` and mounts `./examples/config.example.toml` to `/etc/mirrox/config.toml`. For real deployments, replace that mount source with your own config file.
 
 Run directly with Docker:
 
@@ -84,7 +72,7 @@ docker run --rm \
   ghcr.io/mirrox-dev/mirrox:latest
 ```
 
-## Example config
+## Configuration example
 
 ```toml
 [server]
@@ -117,16 +105,16 @@ incoming_suffix = ".mirror.example.com"
 upstream_suffix = ".bgm.tv"
 ```
 
-See [docs/configuration.md](docs/configuration.md) for the full configuration reference. The Simplified Chinese README is available at [docs/README_zhcn.md](docs/README_zhcn.md).
+See [docs/configuration.md](docs/configuration.md) for the full configuration reference.
 
-## Rewrite modes
+## Rewrite model
 
-By default, Mirrox rewrites both HTTP-layer values and supported text bodies:
+Mirrox has two rewrite layers:
 
-- HTTP layer: `Host`, `Origin`, `Referer`, `Location`, and cookie domains.
-- Body layer: HTML, CSS, JavaScript, and JSON responses under `max_buffer_bytes`.
+- **HTTP layer**: request `Host`, `Origin`, `Referer`; response `Location`; cookie `Domain` attributes.
+- **Body layer**: supported text responses such as HTML, CSS, JavaScript, and JSON under `max_buffer_bytes`.
 
-`MIRROX_REWRITE_BODY` defaults to `enabled`. Set `body_rewrite = "http-only"` on a route, or set `MIRROX_REWRITE_BODY=http-only`, to disable body rewriting while keeping HTTP-layer rewriting.
+Body rewriting defaults to `enabled`. Set `body_rewrite = "http-only"` on a route, or set `MIRROX_REWRITE_BODY=http-only`, to disable body rewriting while keeping HTTP-layer rewriting.
 
 ## Environment variables
 
@@ -147,7 +135,9 @@ git tag -a v0.1.0 -m "Release v0.1.0"
 git push origin v0.1.0
 ```
 
-Images are published to:
+The release workflow also accepts unprefixed semver tags such as `0.1.0`.
+
+Published images use these tags:
 
 ```bash
 docker pull ghcr.io/mirrox-dev/mirrox:latest
@@ -167,4 +157,4 @@ cargo check
 
 ## License
 
-MIT
+Mirrox is licensed under the [MIT License](LICENSE).
