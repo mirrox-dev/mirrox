@@ -105,7 +105,7 @@ impl UpstreamConnector {
 
 pub enum UpstreamStream {
     Plain(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl AsyncRead for UpstreamStream {
@@ -199,7 +199,7 @@ pub async fn tls_stream(
     connector
         .connect(server_name, stream)
         .await
-        .map(UpstreamStream::Tls)
+        .map(|stream| UpstreamStream::Tls(Box::new(stream)))
         .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))
 }
 
