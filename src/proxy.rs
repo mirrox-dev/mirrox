@@ -276,7 +276,14 @@ async fn rewrite_response(
     .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
     let text = String::from_utf8_lossy(&bytes);
     let rewritten = rewrite_text_body(&text, &route.upstream_host, &route.incoming_host);
+    let new_len = rewritten.len();
     parts.headers.remove(CONTENT_LENGTH);
+    parts.headers.remove("transfer-encoding");
+    if new_len > 0 {
+        if let Ok(val) = HeaderValue::from_str(&new_len.to_string()) {
+            parts.headers.insert(CONTENT_LENGTH, val);
+        }
+    }
     Ok(Response::from_parts(parts, Body::from(rewritten)))
 }
 
