@@ -8,6 +8,7 @@ use crate::rewrite::{
 use crate::routing::{MatchedRoute, RouteTable};
 use crate::upstream_proxy::{boxed_body_io, maybe_tls_stream, UpstreamConnector};
 use axum::body::{to_bytes, Body};
+use flate2::read::{GzDecoder, DeflateDecoder};
 use axum::extract::State;
 use axum::http::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, SEC_WEBSOCKET_ACCEPT,
@@ -16,6 +17,7 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
 use futures_util::StreamExt;
 use std::future::Future;
+use std::io::Read;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -274,7 +276,35 @@ async fn rewrite_response(
     )
     .await
     .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
-    let text = String::from_utf8_lossy(&bytes);
+
+    let encoding = parts
+        .headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase());
+    let decoded = match encoding.as_deref() {
+        Some("gzip") => {
+            let mut decoder = GzDecoder::new(bytes.as_ref());
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+            parts.headers.remove("content-encoding");
+            decompressed
+        }
+        Some("deflate") => {
+            let mut decoder = DeflateDecoder::new(bytes.as_ref());
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+            parts.headers.remove("content-encoding");
+            decompressed
+        }
+        _ => bytes.to_vec(),
+    };
+
+    let text = String::from_utf8_lossy(&decoded);
     let rewritten = rewrite_text_body(&text, &route.upstream_host, &route.incoming_host);
     let new_len = rewritten.len();
     parts.headers.remove(CONTENT_LENGTH);

@@ -1,0 +1,16 @@
+services:
+  mirrox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mirrox-dev
+    restart: unless-stopped
+    environment:
+      RUST_LOG: debug
+      MIRROX_CONFIG: /etc/mirrox/config.toml
+      MIRROX_LISTEN: 0.0.0.0:3000
+      MIRROX_REWRITE_BODY: enabled
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config.toml:/etc/mirrox/config.toml:ro
