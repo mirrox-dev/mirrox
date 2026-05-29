@@ -109,6 +109,12 @@ async fn forward_http(
             .map_err(|err| AppError::Config(format!("invalid user_agent header: {err}")))?;
         parts.headers.insert(USER_AGENT, value);
     }
+    if route.body_rewrite == BodyRewriteMode::Enabled {
+        // Strip Accept-Encoding so the upstream returns uncompressed content.
+        // We can only decompress gzip/deflate for rewriting; other encodings
+        // (br, zstd) would arrive as binary and get corrupted by text rewriting.
+        parts.headers.remove("accept-encoding");
+    }
     remove_hop_by_hop_headers(&mut parts.headers, false);
 
     let upstream_request = Request::from_parts(parts, body);
@@ -301,7 +307,13 @@ async fn rewrite_response(
             parts.headers.remove("content-encoding");
             decompressed
         }
-        _ => bytes.to_vec(),
+        Some(_) => {
+            // Unsupported encoding (br, zstd, etc.) — pass through unchanged.
+            // Text rewriting would corrupt the compressed binary payload.
+            let body = Body::from(bytes.to_vec());
+            return Ok(Response::from_parts(parts, body));
+        }
+        None => bytes.to_vec(),
     };
 
     let text = String::from_utf8_lossy(&decoded);
