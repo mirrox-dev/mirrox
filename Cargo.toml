@@ -43,6 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 webpki-roots = "0.26"
+brotli = "8.0.3"
 
 [dev-dependencies]
 axum-test = "16"

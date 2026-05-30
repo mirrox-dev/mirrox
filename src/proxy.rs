@@ -11,8 +11,8 @@ use axum::body::{to_bytes, Body};
 use flate2::read::{GzDecoder, DeflateDecoder};
 use axum::extract::State;
 use axum::http::header::{
-    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, SEC_WEBSOCKET_ACCEPT,
-    SEC_WEBSOCKET_KEY, SET_COOKIE, UPGRADE, USER_AGENT,
+    ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION,
+    SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SET_COOKIE, UPGRADE, USER_AGENT,
 };
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
 use futures_util::StreamExt;
@@ -110,10 +110,13 @@ async fn forward_http(
         parts.headers.insert(USER_AGENT, value);
     }
     if route.body_rewrite == BodyRewriteMode::Enabled {
-        // Strip Accept-Encoding so the upstream returns uncompressed content.
-        // We can only decompress gzip/deflate for rewriting; other encodings
-        // (br, zstd) would arrive as binary and get corrupted by text rewriting.
-        parts.headers.remove("accept-encoding");
+        // Request uncompressed content so we can safely rewrite the body.
+        // Removing Accept-Encoding would mean "any encoding is acceptable" per
+        // RFC 7231 §5.3.4, so we explicitly send `identity` instead.
+        parts.headers.insert(
+            ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
     }
     remove_hop_by_hop_headers(&mut parts.headers, false);
 
@@ -307,13 +310,26 @@ async fn rewrite_response(
             parts.headers.remove("content-encoding");
             decompressed
         }
+        Some("br") => {
+            let mut decompressed = Vec::new();
+            let mut reader: &[u8] = bytes.as_ref();
+            brotli::BrotliDecompress(&mut reader, &mut decompressed)
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+            parts.headers.remove("content-encoding");
+            decompressed
+        }
         Some(_) => {
-            // Unsupported encoding (br, zstd, etc.) — pass through unchanged.
+            // Unsupported encoding — pass through unchanged.
             // Text rewriting would corrupt the compressed binary payload.
             let body = Body::from(bytes.to_vec());
             return Ok(Response::from_parts(parts, body));
         }
-        None => bytes.to_vec(),
+        None => {
+            // Safety net: detect compressed data by magic bytes in case the
+            // upstream ignored our Accept-Encoding: identity and returned
+            // compressed content without a Content-Encoding header.
+            decompress_by_magic(bytes.as_ref())
+        }
     };
 
     let text = String::from_utf8_lossy(&decoded);
@@ -364,6 +380,41 @@ fn rewrite_response_headers(headers: &mut HeaderMap, route: &MatchedRoute) {
             }
         }
     }
+}
+
+/// Attempt decompression based on magic bytes when Content-Encoding is absent.
+/// Some CDNs return compressed content without a Content-Encoding header.
+/// Returns the decompressed bytes, or the original bytes if no known signature
+/// is found.
+fn decompress_by_magic(bytes: &[u8]) -> Vec<u8> {
+    // gzip magic: 1f 8b
+    if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
+        let mut decoder = GzDecoder::new(bytes);
+        let mut out = Vec::new();
+        if decoder.read_to_end(&mut out).is_ok() {
+            return out;
+        }
+    }
+    // zlib magic: 78 followed by 01, 5e, 9c, or da
+    if bytes.len() >= 2 && bytes[0] == 0x78 && matches!(bytes[1], 0x01 | 0x5e | 0x9c | 0xda) {
+        let mut decoder = DeflateDecoder::new(bytes);
+        let mut out = Vec::new();
+        if decoder.read_to_end(&mut out).is_ok() {
+            return out;
+        }
+    }
+    // brotli: the first nibble of a brotli stream encodes the WBITS window
+    // size. Valid first bytes are in the range 0x00-0x0F for the meta-block
+    // header, but we avoid false positives by only trying brotli if the data
+    // is NOT valid UTF-8 (compressed binary almost never is).
+    if !bytes.is_empty() && std::str::from_utf8(bytes).is_err() {
+        let mut reader: &[u8] = bytes;
+        let mut out = Vec::new();
+        if brotli::BrotliDecompress(&mut reader, &mut out).is_ok() && !out.is_empty() {
+            return out;
+        }
+    }
+    bytes.to_vec()
 }
 
 fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
