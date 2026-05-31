@@ -1,4 +1,5 @@
 use crate::config::{normalize_host, AppConfig, BodyRewriteMode, UpstreamScheme};
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +96,7 @@ impl RouteTable {
             .values()
             .map(|r| (r.upstream_host.clone(), r.incoming_host.clone()))
             .collect();
-        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        pairs.sort_by_key(|a| Reverse(a.0.len()));
         pairs
     }
 
