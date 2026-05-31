@@ -8,13 +8,13 @@ use crate::rewrite::{
 use crate::routing::{MatchedRoute, RouteTable};
 use crate::upstream_proxy::{boxed_body_io, maybe_tls_stream, UpstreamConnector};
 use axum::body::{to_bytes, Body};
-use flate2::read::{GzDecoder, DeflateDecoder};
 use axum::extract::State;
 use axum::http::header::{
     ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION,
     SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SET_COOKIE, UPGRADE, USER_AGENT,
 };
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
+use flate2::read::{DeflateDecoder, GzDecoder};
 use futures_util::StreamExt;
 use std::future::Future;
 use std::io::Read;
@@ -113,10 +113,9 @@ async fn forward_http(
         // Request uncompressed content so we can safely rewrite the body.
         // Removing Accept-Encoding would mean "any encoding is acceptable" per
         // RFC 7231 §5.3.4, so we explicitly send `identity` instead.
-        parts.headers.insert(
-            ACCEPT_ENCODING,
-            HeaderValue::from_static("identity"),
-        );
+        parts
+            .headers
+            .insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     }
     remove_hop_by_hop_headers(&mut parts.headers, false);
 
