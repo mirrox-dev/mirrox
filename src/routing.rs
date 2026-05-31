@@ -86,6 +86,19 @@ impl RouteTable {
         Self { exact, wildcard }
     }
 
+    /// Returns all (upstream, incoming) host pairs from exact routes,
+    /// sorted by upstream host length descending to prevent substring collisions
+    /// (e.g. replacing "bgm.tv" before "lain.bgm.tv" would corrupt the latter).
+    pub fn all_rewrite_pairs(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .exact
+            .values()
+            .map(|r| (r.upstream_host.clone(), r.incoming_host.clone()))
+            .collect();
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        pairs
+    }
+
     pub fn match_host(&self, host: &str) -> Option<MatchedRoute> {
         let host = normalize_request_host(host)?;
         if let Some(route) = self.exact.get(&host) {

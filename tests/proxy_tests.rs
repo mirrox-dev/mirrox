@@ -190,6 +190,10 @@ async fn rewrite_upstream() -> impl IntoResponse {
     )
 }
 
+async fn multi_domain_upstream() -> impl IntoResponse {
+    Html(r#"{"calendar_url":"https://lain.bgm.tv/calendar","api":"https://api.bgm.tv/v0"}"#)
+}
+
 #[tokio::test]
 async fn rewrites_response_headers_and_text_body() {
     let app = Router::new().route("/*path", any(rewrite_upstream));
@@ -233,6 +237,56 @@ async fn rewrites_response_headers_and_text_body() {
         "session=abc; Domain=.example.com; Path=/"
     );
     response.assert_text_contains("https://api.example.com/v0/subjects/2");
+}
+
+#[tokio::test]
+async fn rewrites_all_known_upstream_domains_in_body() {
+    let app = Router::new().route("/*path", any(multi_domain_upstream));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+
+        [[routes]]
+        incoming = "lain.example.com"
+        upstream = "lain.bgm.tv"
+        upstream_scheme = "http"
+    "#,
+    )
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+
+    let server = axum_test::TestServer::new(app).unwrap();
+    let response = server
+        .get("/calendar")
+        .add_header("host", "api.example.com")
+        .await;
+
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(
+        !body.contains("lain.bgm.tv"),
+        "lain.bgm.tv should have been rewritten to lain.example.com, but body was: {body}"
+    );
+    assert!(
+        body.contains("lain.example.com"),
+        "body should contain lain.example.com, but was: {body}"
+    );
 }
 
 #[tokio::test]

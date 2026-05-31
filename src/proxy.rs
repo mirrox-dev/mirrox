@@ -333,7 +333,10 @@ async fn rewrite_response(
     };
 
     let text = String::from_utf8_lossy(&decoded);
-    let rewritten = rewrite_text_body(&text, &route.upstream_host, &route.incoming_host);
+    let mut rewritten = text.to_string();
+    for (from, to) in state.routes.all_rewrite_pairs() {
+        rewritten = rewrite_text_body(&rewritten, &from, &to);
+    }
     let new_len = rewritten.len();
     parts.headers.remove(CONTENT_LENGTH);
     parts.headers.remove("transfer-encoding");
