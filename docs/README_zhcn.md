@@ -11,7 +11,7 @@ Mirrox 适合自托管镜像网关、私有域名前置，以及需要显式 hos
 - **配置文件优先路由**：在 `config.toml` 中定义精确域名映射和通配后缀映射。
 - **严格 Host 白名单**：未配置 `Host` 的请求返回 `421 Misdirected Request`。
 - **HTTP 重写支持**：重写上游 `Host`、请求 `Origin` / `Referer`、响应 `Location` 和 Cookie Domain。
-- **可选响应体重写**：重写低于缓冲限制的 HTML、CSS、JavaScript 和 JSON 响应体。
+- **可选响应体重写**：重写低于缓冲限制的 HTML、CSS、JavaScript 和 JSON 响应体。响应体重写会自动应用所有已配置路由的域名映射，因此响应体中的跨域引用（例如 `api.bgm.tv` 响应中出现的 `lain.bgm.tv`）也会被一并替换。
 - **面向流式传输的行为**：SSE、超大响应和非文本资源会透传，避免不必要的缓冲。
 - **WebSocket 支持**：代理升级后的 WebSocket 连接。
 - **出站代理支持**：上游连接可直连，也可通过 HTTP CONNECT / SOCKS5 代理。
@@ -131,7 +131,7 @@ Mirrox 部署在 Cloudflare Tunnel 后面时，Cloudflare 可以把多个公网 
 Mirrox 有两层重写：
 
 - **HTTP 层**：请求 `Host`、`Origin`、`Referer`；响应 `Location`；Cookie `Domain` 属性。
-- **响应体层**：低于 `max_buffer_bytes` 的 HTML、CSS、JavaScript 和 JSON 等文本响应。
+- **响应体层**：低于 `max_buffer_bytes` 的 HTML、CSS、JavaScript 和 JSON 等文本响应。启用响应体重写后，所有已配置路由的域名映射都会应用于每条可重写的响应——不仅仅是当前匹配路由的上游域名，从而确保跨域引用也被透明替换。
 
 响应体重写默认启用。可以在路由上设置 `body_rewrite = "http-only"`，或设置 `MIRROX_REWRITE_BODY=http-only`，以关闭响应体重写但保留 HTTP 层重写。
 
