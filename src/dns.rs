@@ -70,12 +70,14 @@ impl DnsResolver for HickoryDnsResolver {
             .map_err(|source| AppError::Dns {
                 host: host.to_string(),
                 source: anyhow::Error::new(source),
+                incoming_host: String::new(),
             })?;
         let addresses: Vec<_> = lookup.collect();
         if addresses.is_empty() {
             return Err(AppError::Dns {
                 host: host.to_string(),
                 source: anyhow::anyhow!("no addresses returned"),
+                incoming_host: String::new(),
             });
         }
         Ok(addresses)

@@ -86,6 +86,10 @@ pub struct ServerConfig {
     pub https_listen: String,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
 }
 
 impl Default for ServerConfig {
@@ -97,6 +101,8 @@ impl Default for ServerConfig {
             https_listen: default_https_listen(),
             tls_cert: None,
             tls_key: None,
+            connect_timeout_ms: default_connect_timeout_ms(),
+            request_timeout_ms: default_request_timeout_ms(),
         }
     }
 }
@@ -210,6 +216,16 @@ impl AppConfig {
         }
         if let Ok(proxy) = std::env::var("MIRROX_UPSTREAM_PROXY") {
             config.upstream_proxy.default = normalize_proxy_override(&proxy);
+        }
+        if let Ok(ms) = std::env::var("MIRROX_CONNECT_TIMEOUT_MS") {
+            if let Ok(ms) = ms.parse::<u64>() {
+                config.server.connect_timeout_ms = ms;
+            }
+        }
+        if let Ok(ms) = std::env::var("MIRROX_REQUEST_TIMEOUT_MS") {
+            if let Ok(ms) = ms.parse::<u64>() {
+                config.server.request_timeout_ms = ms;
+            }
         }
         config.validate()?;
         Ok(config)
@@ -340,4 +356,10 @@ fn default_dns_timeout() -> u64 {
 }
 fn default_max_buffer_bytes() -> usize {
     2 * 1024 * 1024
+}
+fn default_connect_timeout_ms() -> u64 {
+    10_000
+}
+fn default_request_timeout_ms() -> u64 {
+    60_000
 }

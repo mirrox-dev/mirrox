@@ -20,6 +20,8 @@ use std::future::Future;
 use std::io::Read;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tower::service_fn;
@@ -55,11 +57,17 @@ pub async fn proxy_handler(
         .match_host(host)
         .ok_or_else(|| AppError::RouteNotFound(host.to_string()))?;
 
+    let incoming_host = host.to_string();
+
     if is_websocket_upgrade(request.headers()) {
-        return forward_websocket(state, route, request).await;
+        return forward_websocket(state, route, request)
+            .await
+            .map_err(|e| e.with_incoming_host(&incoming_host));
     }
 
-    forward_http(state, route, request).await
+    forward_http(state, route, request)
+        .await
+        .map_err(|e| e.with_incoming_host(&incoming_host))
 }
 
 fn upstream_authority(route: &MatchedRoute) -> String {
@@ -93,7 +101,7 @@ async fn forward_http(
         path_and_query
     )
     .parse()
-    .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
 
     let (mut parts, body) = request.into_parts();
     parts.uri = upstream_uri;
@@ -122,6 +130,7 @@ async fn forward_http(
     let upstream_request = Request::from_parts(parts, body);
     let connector = UpstreamConnector::new(state.dns.clone());
     let route_for_connect = route.clone();
+    let connect_timeout = Duration::from_millis(state.config.server.connect_timeout_ms);
     let service = service_fn(move |uri: Uri| {
         let connector = connector.clone();
         let route = route_for_connect.clone();
@@ -129,27 +138,31 @@ async fn forward_http(
             Box::pin(async move {
                 let host = uri
                     .host()
-                    .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing upstream host")))?;
+                    .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing upstream host"), String::new()))?;
                 let port = uri.port_u16().unwrap_or(route.upstream_port);
-                let stream = connector
-                    .connect(route.upstream_proxy.as_deref(), host, port)
-                    .await?;
-                let stream = maybe_tls_stream(
+                let stream = timeout(connect_timeout, connector.connect(route.upstream_proxy.as_deref(), host, port))
+                    .await
+                    .map_err(|_| AppError::UpstreamTimeout(String::new()))?
+                    ?;
+                let stream = timeout(connect_timeout, maybe_tls_stream(
                     stream,
                     host,
                     matches!(route.upstream_scheme, UpstreamScheme::Https),
-                )
-                .await?;
+                ))
+                .await
+                .map_err(|_| AppError::UpstreamTimeout(String::new()))?
+                ?;
                 Ok(boxed_body_io(stream))
             });
         future
     });
     let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
         .build::<_, Body>(service);
-    let upstream_response = client
-        .request(upstream_request)
+    let request_timeout = Duration::from_millis(state.config.server.request_timeout_ms);
+    let upstream_response = timeout(request_timeout, client.request(upstream_request))
         .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+        .map_err(|_| AppError::UpstreamTimeout(String::new()))?
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
 
     rewrite_response(state, route, upstream_response).await
 }
@@ -181,7 +194,7 @@ async fn forward_websocket(
     );
     let mut upstream_request = upstream_url
         .into_client_request()
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
     let connector = UpstreamConnector::new(state.dns.clone());
     let upstream_proxy = route.upstream_proxy.clone();
     let upstream_host = route.upstream_host.clone();
@@ -210,7 +223,7 @@ async fn forward_websocket(
         .get(SEC_WEBSOCKET_KEY)
         .and_then(|value| value.to_str().ok())
         .map(|value| derive_accept_key(value.as_bytes()))
-        .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing Sec-WebSocket-Key")))?;
+        .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing Sec-WebSocket-Key"), String::new()))?;
     let upgraded = hyper::upgrade::on(request);
     tokio::spawn(async move {
         let Ok(client) = upgraded.await else {
@@ -248,7 +261,7 @@ async fn forward_websocket(
         .header(UPGRADE, "websocket")
         .header(SEC_WEBSOCKET_ACCEPT, accept_key)
         .body(Body::empty())
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))
 }
 
 async fn rewrite_response(
@@ -283,7 +296,7 @@ async fn rewrite_response(
         state.config.rewrite.max_buffer_bytes,
     )
     .await
-    .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+    .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
 
     let encoding = parts
         .headers
@@ -296,7 +309,7 @@ async fn rewrite_response(
             let mut decompressed = Vec::new();
             decoder
                 .read_to_end(&mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
             parts.headers.remove("content-encoding");
             decompressed
         }
@@ -305,7 +318,7 @@ async fn rewrite_response(
             let mut decompressed = Vec::new();
             decoder
                 .read_to_end(&mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
             parts.headers.remove("content-encoding");
             decompressed
         }
@@ -313,7 +326,7 @@ async fn rewrite_response(
             let mut decompressed = Vec::new();
             let mut reader: &[u8] = bytes.as_ref();
             brotli::BrotliDecompress(&mut reader, &mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err)))?;
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
             parts.headers.remove("content-encoding");
             decompressed
         }
