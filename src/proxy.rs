@@ -136,22 +136,26 @@ async fn forward_http(
         let route = route_for_connect.clone();
         let future: Pin<Box<dyn Future<Output = Result<_, AppError>> + Send>> =
             Box::pin(async move {
-                let host = uri
-                    .host()
-                    .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing upstream host"), String::new()))?;
+                let host = uri.host().ok_or_else(|| {
+                    AppError::Upstream(anyhow::anyhow!("missing upstream host"), String::new())
+                })?;
                 let port = uri.port_u16().unwrap_or(route.upstream_port);
-                let stream = timeout(connect_timeout, connector.connect(route.upstream_proxy.as_deref(), host, port))
-                    .await
-                    .map_err(|_| AppError::UpstreamTimeout(String::new()))?
-                    ?;
-                let stream = timeout(connect_timeout, maybe_tls_stream(
-                    stream,
-                    host,
-                    matches!(route.upstream_scheme, UpstreamScheme::Https),
-                ))
+                let stream = timeout(
+                    connect_timeout,
+                    connector.connect(route.upstream_proxy.as_deref(), host, port),
+                )
                 .await
-                .map_err(|_| AppError::UpstreamTimeout(String::new()))?
-                ?;
+                .map_err(|_| AppError::UpstreamTimeout(String::new()))??;
+                let stream = timeout(
+                    connect_timeout,
+                    maybe_tls_stream(
+                        stream,
+                        host,
+                        matches!(route.upstream_scheme, UpstreamScheme::Https),
+                    ),
+                )
+                .await
+                .map_err(|_| AppError::UpstreamTimeout(String::new()))??;
                 Ok(boxed_body_io(stream))
             });
         future
@@ -223,7 +227,9 @@ async fn forward_websocket(
         .get(SEC_WEBSOCKET_KEY)
         .and_then(|value| value.to_str().ok())
         .map(|value| derive_accept_key(value.as_bytes()))
-        .ok_or_else(|| AppError::Upstream(anyhow::anyhow!("missing Sec-WebSocket-Key"), String::new()))?;
+        .ok_or_else(|| {
+            AppError::Upstream(anyhow::anyhow!("missing Sec-WebSocket-Key"), String::new())
+        })?;
     let upgraded = hyper::upgrade::on(request);
     tokio::spawn(async move {
         let Ok(client) = upgraded.await else {

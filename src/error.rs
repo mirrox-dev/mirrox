@@ -30,9 +30,7 @@ impl AppError {
                 incoming_host: incoming_host.to_string(),
             },
             AppError::Upstream(err, _) => AppError::Upstream(err, incoming_host.to_string()),
-            AppError::UpstreamTimeout(_) => {
-                AppError::UpstreamTimeout(incoming_host.to_string())
-            }
+            AppError::UpstreamTimeout(_) => AppError::UpstreamTimeout(incoming_host.to_string()),
             other => other,
         }
     }
@@ -62,7 +60,10 @@ impl IntoResponse for AppError {
 
             let html = ERROR_PAGE_TEMPLATE
                 .replace("{status_code}", status.as_str())
-                .replace("{status_reason}", status.canonical_reason().unwrap_or("Error"))
+                .replace(
+                    "{status_reason}",
+                    status.canonical_reason().unwrap_or("Error"),
+                )
                 .replace("{error_type}", error_type)
                 .replace("{domain}", incoming_host);
 
