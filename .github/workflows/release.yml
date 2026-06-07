@@ -134,9 +134,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: |
-            mirrox-x86_64-*
-            mirrox-aarch64-*
+          pattern: mirrox-{x86_64,aarch64}-*
           merge-multiple: true
 
       - name: Create release notes file
