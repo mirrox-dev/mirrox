@@ -115,6 +115,48 @@ fn unknown_host_is_rejected() {
 }
 
 #[test]
+fn rewrite_pairs_for_wildcard_match_include_matched_route_mapping() {
+    let table = table();
+    let route = table
+        .match_host("api.example.com")
+        .expect("route should match");
+
+    // The wildcard expansion api.bgm.tv -> api.example.com is not in the exact
+    // table, so rewrite_pairs_for must add it on top of the exact pairs.
+    let pairs = table.rewrite_pairs_for(&route);
+
+    assert!(
+        pairs.contains(&("api.bgm.tv".to_string(), "api.example.com".to_string())),
+        "wildcard-matched route's own mapping must be present, got: {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("www.bgm.tv".to_string(), "www.example.com".to_string())),
+        "exact route mappings must still be present, got: {pairs:?}"
+    );
+}
+
+#[test]
+fn rewrite_pairs_for_exact_match_have_no_duplicate() {
+    let table = table();
+    let route = table
+        .match_host("www.example.com")
+        .expect("route should match");
+
+    // An exact match is already in the exact table, so the pair list must not
+    // gain a duplicate entry for it.
+    let pairs = table.rewrite_pairs_for(&route);
+    let www_count = pairs
+        .iter()
+        .filter(|(upstream, _)| upstream == "www.bgm.tv")
+        .count();
+
+    assert_eq!(
+        www_count, 1,
+        "exact match must not be duplicated: {pairs:?}"
+    );
+}
+
+#[test]
 fn matched_route_inherits_global_upstream_proxy() {
     let config = AppConfig::from_toml_str(
         r#"

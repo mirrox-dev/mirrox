@@ -276,7 +276,8 @@ async fn rewrite_response(
     response: Response<hyper::body::Incoming>,
 ) -> Result<Response<Body>, AppError> {
     let (mut parts, body) = response.into_parts();
-    rewrite_response_headers(&mut parts.headers, &route);
+    let rewrite_pairs = state.routes.rewrite_pairs_for(&route);
+    rewrite_response_headers(&mut parts.headers, &route, &rewrite_pairs);
 
     let content_type = parts
         .headers
@@ -352,8 +353,8 @@ async fn rewrite_response(
 
     let text = String::from_utf8_lossy(&decoded);
     let mut rewritten = text.to_string();
-    for (from, to) in state.routes.all_rewrite_pairs() {
-        rewritten = rewrite_text_body(&rewritten, &from, &to);
+    for (from, to) in &rewrite_pairs {
+        rewritten = rewrite_text_body(&rewritten, from, to);
     }
     let new_len = rewritten.len();
     parts.headers.remove(CONTENT_LENGTH);
@@ -377,9 +378,20 @@ fn rewrite_request_headers(headers: &mut HeaderMap, route: &MatchedRoute) {
     }
 }
 
-fn rewrite_response_headers(headers: &mut HeaderMap, route: &MatchedRoute) {
+fn rewrite_response_headers(
+    headers: &mut HeaderMap,
+    route: &MatchedRoute,
+    rewrite_pairs: &[(String, String)],
+) {
     if let Some(value) = headers.get(LOCATION).and_then(|value| value.to_str().ok()) {
-        let rewritten = rewrite_header_value(value, &route.upstream_host, &route.incoming_host);
+        // Apply every known upstream->incoming mapping, not just the matched
+        // route's, so a redirect to a sibling upstream domain (e.g. an
+        // api.bgm.tv response redirecting to lain.bgm.tv) is rewritten to its
+        // mirror domain instead of leaking the upstream host.
+        let mut rewritten = value.to_string();
+        for (from, to) in rewrite_pairs {
+            rewritten = rewrite_header_value(&rewritten, from, to);
+        }
         if let Ok(value) = HeaderValue::from_str(&rewritten) {
             headers.insert(LOCATION, value);
         }

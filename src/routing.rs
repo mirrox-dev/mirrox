@@ -100,6 +100,25 @@ impl RouteTable {
         pairs
     }
 
+    /// Rewrite pairs to apply to a response served for `route`: every exact
+    /// route's (upstream, incoming) mapping, plus `route`'s own mapping when it
+    /// is not already present (a wildcard match is not in the exact table).
+    /// Used to rewrite upstream hosts out of response `Location` headers and
+    /// bodies, including cross-domain references to sibling upstreams (e.g. a
+    /// redirect from `api.bgm.tv` pointing at `lain.bgm.tv`). Sorted by upstream
+    /// host length descending to prevent substring collisions.
+    pub fn rewrite_pairs_for(&self, route: &MatchedRoute) -> Vec<(String, String)> {
+        let mut pairs = self.all_rewrite_pairs();
+        if !pairs
+            .iter()
+            .any(|(upstream, _)| upstream == &route.upstream_host)
+        {
+            pairs.push((route.upstream_host.clone(), route.incoming_host.clone()));
+            pairs.sort_by_key(|pair| Reverse(pair.0.len()));
+        }
+        pairs
+    }
+
     pub fn match_host(&self, host: &str) -> Option<MatchedRoute> {
         let host = normalize_request_host(host)?;
         if let Some(route) = self.exact.get(&host) {

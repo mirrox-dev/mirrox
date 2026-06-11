@@ -194,6 +194,16 @@ async fn multi_domain_upstream() -> impl IntoResponse {
     Html(r#"{"calendar_url":"https://lain.bgm.tv/calendar","api":"https://api.bgm.tv/v0"}"#)
 }
 
+async fn cross_domain_redirect_upstream() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::FOUND,
+        [(
+            "location",
+            "https://lain.bgm.tv/r/400/pic/cover/l/c5/1c/13_tQxwM.jpg",
+        )],
+    )
+}
+
 #[tokio::test]
 async fn rewrites_response_headers_and_text_body() {
     let app = Router::new().route("/*path", any(rewrite_upstream));
@@ -286,6 +296,51 @@ async fn rewrites_all_known_upstream_domains_in_body() {
     assert!(
         body.contains("lain.example.com"),
         "body should contain lain.example.com, but was: {body}"
+    );
+}
+
+#[tokio::test]
+async fn rewrites_cross_domain_location_header() {
+    let app = Router::new().route("/*path", any(cross_domain_redirect_upstream));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+
+        [[routes]]
+        incoming = "lain.example.com"
+        upstream = "lain.bgm.tv"
+        upstream_scheme = "http"
+    "#,
+    )
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+
+    let server = axum_test::TestServer::new(app).unwrap();
+    let response = server
+        .get("/v0/subjects/13/image")
+        .add_header("host", "api.example.com")
+        .await;
+
+    assert_eq!(
+        response.headers()["location"],
+        "https://lain.example.com/r/400/pic/cover/l/c5/1c/13_tQxwM.jpg",
+        "a redirect to a sibling upstream domain must be rewritten to its mirror domain"
     );
 }
 
