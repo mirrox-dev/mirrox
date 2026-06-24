@@ -23,6 +23,17 @@ default = "direct"
 body = "enabled"
 max_buffer_bytes = 2097152
 
+# [scripts]
+# dir = "./scripts"                   # Local directory containing JS files.
+# prefix = "/mirrox-scripts"          # URL prefix for serving local scripts.
+# global = ["analytics.js", "theme.js"]  # Scripts injected into ALL routes.
+#
+# Per-route scripts are added alongside global scripts:
+# [[routes]]
+# incoming = "a.example.com"
+# upstream = "a.site.com"
+# scripts = ["custom-a.js", "https://cdn.example.com/ext.js"]
+
 [[routes]]
 incoming = "api.example.com"
 upstream = "api.bgm.tv"
@@ -32,6 +43,7 @@ incoming = "www.example.com"
 upstream = "www.bgm.tv"
 body_rewrite = "http-only"
 upstream_proxy = "http://user:pass@127.0.0.1:8080"
+# scripts = ["custom.js"]           # Route-specific scripts (in addition to global).
 
 [[wildcard_routes]]
 incoming_suffix = ".mirror.example.com"

@@ -80,6 +80,32 @@ max_buffer_bytes = 2097152
 
 SSE (`text/event-stream`) and non-text assets are streamed through without body rewriting.
 
+## Script injection
+
+```toml
+[scripts]
+dir = "./scripts"
+prefix = "/mirrox-scripts"
+global = ["analytics.js", "theme.js"]
+```
+
+- `dir`: local directory containing JS files to serve. Mirrox reads files from this directory and serves them at `/{prefix}/{filename}`.
+- `prefix`: URL path prefix for the built-in static file server. Default: `/mirrox-scripts`.
+- `global`: list of scripts injected into **all** routes. Each entry is either a local filename (served from `dir`) or a remote URL (starting with `http://` or `https://`).
+
+Route-specific scripts are added in addition to global scripts:
+
+```toml
+[[routes]]
+incoming = "a.example.com"
+upstream = "a.site.com"
+scripts = ["custom-a.js", "https://cdn.example.com/ext.js"]
+```
+
+Global scripts are injected first, followed by route-specific scripts. All `<script>` tags are inserted just before `</head>` in HTML responses. Remote URLs are used as-is; local filenames are resolved against the configured `prefix`.
+
+Both `[[routes]]` and `[[wildcard_routes]]` support the `scripts` field.
+
 ## Exact routes
 
 ```toml
@@ -95,9 +121,10 @@ upstream_scheme = "http"
 upstream_port = 8080
 user_agent = "Mozilla/5.0 (compatible; Mirrox)"
 body_rewrite = "http-only"
+# scripts = ["custom.js"]  # Route-specific scripts (in addition to global).
 ```
 
-Exact routes map one incoming host to one upstream host. Upstream connections default to `upstream_scheme = "https"` and `upstream_port = 443`. Per-route `upstream_scheme` accepts `"http"` or `"https"`; `upstream_port` overrides the port used for the upstream TCP connection; `body_rewrite` overrides `[rewrite].body`.
+Exact routes map one incoming host to one upstream host. Upstream connections default to `upstream_scheme = "https"` and `upstream_port = 443`. Per-route `upstream_scheme` accepts `"http"` or `"https"`; `upstream_port` overrides the port used for the upstream TCP connection; `body_rewrite` overrides `[rewrite].body`; `scripts` adds route-specific script injection on top of global scripts.
 
 Set `user_agent` on a route to replace the upstream request `User-Agent` header. Omit `user_agent` to preserve the client's original `User-Agent`.
 
@@ -114,7 +141,7 @@ upstream_port = 443
 
 Wildcard routes map a single-label subdomain prefix to another suffix. For example, `incoming_suffix = ".example.com"` with `upstream_suffix = ".bgm.tv"` maps `api.example.com` to `api.bgm.tv`. It only matches one label before the suffix, so `v1.api.example.com` is not matched by that wildcard route. Exact routes take priority over wildcard routes.
 
-Wildcard routes support the same upstream connection fields as exact routes: `upstream_scheme = "http"` or `"https"`, `upstream_port`, and `user_agent`. If omitted, wildcard upstreams also default to HTTPS on port `443` and preserve the client's `User-Agent`.
+Wildcard routes support the same upstream connection fields as exact routes: `upstream_scheme = "http"` or `"https"`, `upstream_port`, `user_agent`, and `scripts`. If omitted, wildcard upstreams also default to HTTPS on port `443` and preserve the client's `User-Agent`.
 
 ## Cloudflare Tunnel deployments
 

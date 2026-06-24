@@ -12,6 +12,7 @@ Mirrox 适合自托管镜像网关、私有域名前置，以及需要显式 hos
 - **严格 Host 白名单**：未配置 `Host` 的请求返回 `421 Misdirected Request`。
 - **HTTP 重写支持**：重写上游 `Host`、请求 `Origin` / `Referer`、响应 `Location` 和 Cookie Domain。
 - **可选响应体重写**：重写低于缓冲限制的 HTML、CSS、JavaScript 和 JSON 响应体。响应体重写会自动应用所有已配置路由的域名映射，因此响应体中的跨域引用（例如 `api.bgm.tv` 响应中出现的 `lain.bgm.tv`）也会被一并替换。
+- **脚本注入**：向 HTML 响应注入 `<script>` 标签，为镜像站点提供自定义 JS 扩展能力。支持全局脚本（所有路由）和路由级脚本，可使用本地文件或远程 URL。
 - **面向流式传输的行为**：SSE、超大响应和非文本资源会透传，避免不必要的缓冲。
 - **WebSocket 支持**：代理升级后的 WebSocket 连接。
 - **出站代理支持**：上游连接可直连，也可通过 HTTP CONNECT / SOCKS5 代理。
@@ -90,6 +91,10 @@ default = "direct"
 body = "enabled"
 max_buffer_bytes = 2097152
 
+[scripts]
+dir = "./scripts"
+# global = ["analytics.js"]         # 注入到所有路由的脚本。
+
 [[routes]]
 incoming = "api.example.com"
 upstream = "api.bgm.tv"
@@ -134,6 +139,29 @@ Mirrox 有两层重写：
 - **响应体层**：低于 `max_buffer_bytes` 的 HTML、CSS、JavaScript 和 JSON 等文本响应。启用响应体重写后，所有已配置路由的域名映射都会应用于每条可重写的响应——不仅仅是当前匹配路由的上游域名，从而确保跨域引用也被透明替换。
 
 响应体重写默认启用。可以在路由上设置 `body_rewrite = "http-only"`，或设置 `MIRROX_REWRITE_BODY=http-only`，以关闭响应体重写但保留 HTTP 层重写。
+
+## 脚本注入
+
+Mirrox 可以向 HTML 响应注入 `<script>` 标签，为镜像站点提供自定义 JavaScript 扩展能力（类似 Tampermonkey / 油猴脚本）。
+
+```toml
+[scripts]
+dir = "./scripts"                     # 本地 JS 文件目录。
+prefix = "/mirrox-scripts"            # URL 前缀（默认：/mirrox-scripts）。
+global = ["analytics.js", "theme.js"] # 注入到所有路由。
+
+[[routes]]
+incoming = "a.example.com"
+upstream = "a.site.com"
+scripts = ["custom-a.js", "https://cdn.example.com/ext.js"]
+```
+
+- 全局脚本先注入，路由级脚本后注入。
+- 本地文件名从 `dir` 目录读取，在 `/{prefix}/{filename}` 路径下提供服务。
+- 远程 URL（`http://` / `https://`）直接作为 `<script src="...">` 使用。
+- `[[routes]]` 和 `[[wildcard_routes]]` 都支持 `scripts` 字段。
+
+完整配置说明见 [configuration_zhcn.md](configuration_zhcn.md)。
 
 ## 环境变量
 

@@ -6,6 +6,7 @@ use crate::rewrite::{
     rewrite_text_body,
 };
 use crate::routing::{MatchedRoute, RouteTable};
+use crate::scripts::inject_scripts;
 use crate::upstream_proxy::{boxed_body_io, maybe_tls_stream, UpstreamConnector};
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
@@ -300,12 +301,14 @@ async fn rewrite_response(
     let rewrite_pairs = state.routes.rewrite_pairs_for(&route);
     rewrite_response_headers(&mut parts.headers, &route, &rewrite_pairs);
 
-    let content_type = parts
+    let content_type: Option<String> = parts
         .headers
         .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok());
+        .and_then(|value| value.to_str().ok())
+        .map(|s| s.to_ascii_lowercase());
     let should_rewrite_body =
-        route.body_rewrite == BodyRewriteMode::Enabled && is_rewritable_content_type(content_type);
+        route.body_rewrite == BodyRewriteMode::Enabled
+            && is_rewritable_content_type(content_type.as_deref());
     let content_length = parts
         .headers
         .get(CONTENT_LENGTH)
@@ -377,6 +380,17 @@ async fn rewrite_response(
     for (from, to) in &rewrite_pairs {
         rewritten = rewrite_text_body(&rewritten, from, to);
     }
+
+    // Inject script tags into HTML responses when scripts are configured.
+    let is_html = content_type
+        .as_deref()
+        .map(|ct| ct.contains("text/html"))
+        .unwrap_or(false);
+    if is_html && !route.scripts.is_empty() {
+        let prefix = &state.config.scripts.prefix;
+        rewritten = inject_scripts(&rewritten, &route.scripts, prefix);
+    }
+
     let new_len = rewritten.len();
     parts.headers.remove(CONTENT_LENGTH);
     parts.headers.remove("transfer-encoding");

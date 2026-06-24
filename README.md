@@ -12,6 +12,7 @@ Mirrox is designed for self-hosted mirror gateways, private domain fronting, and
 - **Strict host allowlist**: requests for unconfigured `Host` values return `421 Misdirected Request`.
 - **HTTP rewrite support**: rewrites upstream `Host`, request `Origin` / `Referer`, response `Location`, and cookie domains.
 - **Optional body rewriting**: rewrites supported HTML, CSS, JavaScript, and JSON bodies below the configured buffer limit. All configured route domain mappings are applied automatically, so cross-domain references in response bodies (e.g. `lain.bgm.tv` appearing in an `api.bgm.tv` response) are also rewritten.
+- **Script injection**: inject `<script>` tags into HTML responses for custom JS extensibility. Supports global scripts (all routes) and per-route scripts, with local file serving or remote URLs.
 - **Streaming-aware behavior**: passes through SSE, oversized responses, and non-text assets without unnecessary buffering.
 - **WebSocket support**: proxies upgraded WebSocket connections.
 - **Outbound proxy support**: connect to upstreams directly or through HTTP CONNECT / SOCKS5 proxies.
@@ -90,6 +91,10 @@ default = "direct"
 body = "enabled"
 max_buffer_bytes = 2097152
 
+[scripts]
+dir = "./scripts"
+# global = ["analytics.js"]         # Scripts injected into all routes.
+
 [[routes]]
 incoming = "api.example.com"
 upstream = "api.bgm.tv"
@@ -134,6 +139,29 @@ Mirrox has two rewrite layers:
 - **Body layer**: supported text responses such as HTML, CSS, JavaScript, and JSON under `max_buffer_bytes`. When body rewriting is enabled, all configured route domain mappings are applied to every rewritable response — not just the upstream host from the matched route. This ensures cross-domain references are transparently rewritten.
 
 Body rewriting defaults to `enabled`. Set `body_rewrite = "http-only"` on a route, or set `MIRROX_REWRITE_BODY=http-only`, to disable body rewriting while keeping HTTP-layer rewriting.
+
+## Script injection
+
+Mirrox can inject `<script>` tags into HTML responses, giving mirrored sites extensibility via custom JavaScript (similar to Tampermonkey / userscripts).
+
+```toml
+[scripts]
+dir = "./scripts"                     # Local directory for JS files.
+prefix = "/mirrox-scripts"            # URL prefix (default: /mirrox-scripts).
+global = ["analytics.js", "theme.js"] # Injected into ALL routes.
+
+[[routes]]
+incoming = "a.example.com"
+upstream = "a.site.com"
+scripts = ["custom-a.js", "https://cdn.example.com/ext.js"]
+```
+
+- Global scripts are injected first, then route-specific scripts.
+- Local filenames are served from `dir` at `/{prefix}/{filename}`.
+- Remote URLs (`http://` / `https://`) are used as `<script src="...">` directly.
+- Both `[[routes]]` and `[[wildcard_routes]]` support `scripts`.
+
+See [docs/configuration.md](docs/configuration.md) for the full configuration reference.
 
 ## Environment variables
 

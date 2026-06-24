@@ -62,6 +62,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub rewrite: RewriteConfig,
     #[serde(default)]
+    pub scripts: ScriptsConfig,
+    #[serde(default)]
     pub routes: Vec<RouteConfig>,
     #[serde(default)]
     pub wildcard_routes: Vec<WildcardRouteConfig>,
@@ -72,6 +74,29 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UpstreamProxyConfig {
     pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScriptsConfig {
+    /// Directory containing local JS files to serve.
+    #[serde(default = "default_scripts_dir")]
+    pub dir: String,
+    /// URL prefix for serving local scripts (default: "/mirrox-scripts").
+    #[serde(default = "default_scripts_prefix")]
+    pub prefix: String,
+    /// Global scripts applied to all routes (filenames or remote URLs).
+    #[serde(default)]
+    pub global: Vec<String>,
+}
+
+impl Default for ScriptsConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_scripts_dir(),
+            prefix: default_scripts_prefix(),
+            global: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,6 +185,9 @@ pub struct RouteConfig {
     pub upstream_scheme: UpstreamScheme,
     pub upstream_port: Option<u16>,
     pub user_agent: Option<String>,
+    /// Route-specific scripts (filenames or remote URLs).
+    #[serde(default)]
+    pub scripts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -172,6 +200,9 @@ pub struct WildcardRouteConfig {
     pub upstream_scheme: UpstreamScheme,
     pub upstream_port: Option<u16>,
     pub user_agent: Option<String>,
+    /// Route-specific scripts (filenames or remote URLs).
+    #[serde(default)]
+    pub scripts: Vec<String>,
 }
 
 impl AppConfig {
@@ -362,4 +393,10 @@ fn default_connect_timeout_ms() -> u64 {
 }
 fn default_request_timeout_ms() -> u64 {
     60_000
+}
+fn default_scripts_dir() -> String {
+    "./scripts".into()
+}
+fn default_scripts_prefix() -> String {
+    "/mirrox-scripts".into()
 }

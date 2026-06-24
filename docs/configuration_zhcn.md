@@ -80,6 +80,32 @@ max_buffer_bytes = 2097152
 
 SSE（`text/event-stream`）和非文本资源会直接流式透传，不做正文重写。
 
+## 脚本注入
+
+```toml
+[scripts]
+dir = "./scripts"
+prefix = "/mirrox-scripts"
+global = ["analytics.js", "theme.js"]
+```
+
+- `dir`：本地 JS 文件目录。Mirrox 从该目录读取文件，并在 `/{prefix}/{filename}` 路径下提供服务。
+- `prefix`：内置静态文件服务的 URL 路径前缀。默认值：`/mirrox-scripts`。
+- `global`：注入到**所有**路由的脚本列表。每项可以是本地文件名（从 `dir` 目录提供）或远程 URL（以 `http://` 或 `https://` 开头）。
+
+路由级脚本在全局脚本之外叠加注入：
+
+```toml
+[[routes]]
+incoming = "a.example.com"
+upstream = "a.site.com"
+scripts = ["custom-a.js", "https://cdn.example.com/ext.js"]
+```
+
+全局脚本先注入，路由级脚本后注入。所有 `<script>` 标签插入到 HTML 响应的 `</head>` 之前。远程 URL 直接使用；本地文件名根据配置的 `prefix` 解析。
+
+`[[routes]]` 和 `[[wildcard_routes]]` 都支持 `scripts` 字段。
+
 ## 精确路由
 
 ```toml
@@ -95,9 +121,10 @@ upstream_scheme = "http"
 upstream_port = 8080
 user_agent = "Mozilla/5.0 (compatible; Mirrox)"
 body_rewrite = "http-only"
+# scripts = ["custom.js"]  # 路由级脚本（在全局脚本之外叠加）。
 ```
 
-精确路由将一个入口域名映射到一个上游域名。上游连接默认使用 `upstream_scheme = "https"` 和 `upstream_port = 443`。路由级 `upstream_scheme` 可设置为 `"http"` 或 `"https"`；`upstream_port` 覆盖上游 TCP 连接使用的端口；`body_rewrite` 可以覆盖 `[rewrite].body`。
+精确路由将一个入口域名映射到一个上游域名。上游连接默认使用 `upstream_scheme = "https"` 和 `upstream_port = 443`。路由级 `upstream_scheme` 可设置为 `"http"` 或 `"https"`；`upstream_port` 覆盖上游 TCP 连接使用的端口；`body_rewrite` 可以覆盖 `[rewrite].body`；`scripts` 在全局脚本之外叠加路由级脚本注入。
 
 在路由上设置 `user_agent` 可替换发往上游请求的 `User-Agent` 头。省略 `user_agent` 时会保留客户端原始 `User-Agent`。
 
@@ -114,7 +141,7 @@ upstream_port = 443
 
 通配后缀路由会把单级子域名前缀映射到另一个后缀。例如 `incoming_suffix = ".example.com"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.example.com` 映射到 `api.bgm.tv`。它只匹配后缀前的一个标签，因此 `v1.api.example.com` 不会被这条通配路由匹配。精确路由优先级高于通配后缀路由。
 
-通配路由支持与精确路由相同的上游连接字段：`upstream_scheme = "http"` 或 `"https"`、`upstream_port` 和 `user_agent`。省略时，通配路由的上游同样默认使用 HTTPS 443，并保留客户端的 `User-Agent`。
+通配路由支持与精确路由相同的上游连接字段：`upstream_scheme = "http"` 或 `"https"`、`upstream_port`、`user_agent` 和 `scripts`。省略时，通配路由的上游同样默认使用 HTTPS 443，并保留客户端的 `User-Agent`。
 
 ## Cloudflare Tunnel 部署
 

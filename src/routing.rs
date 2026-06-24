@@ -11,12 +11,15 @@ pub struct MatchedRoute {
     pub upstream_scheme: UpstreamScheme,
     pub upstream_port: u16,
     pub user_agent: Option<String>,
+    /// Resolved scripts: global scripts followed by route-specific scripts.
+    pub scripts: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RouteTable {
     exact: HashMap<String, MatchedRoute>,
     wildcard: Vec<WildcardRule>,
+    global_scripts: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -28,10 +31,14 @@ struct WildcardRule {
     upstream_scheme: UpstreamScheme,
     upstream_port: u16,
     user_agent: Option<String>,
+    /// Route-specific scripts for this wildcard rule.
+    scripts: Vec<String>,
 }
 
 impl RouteTable {
     pub fn from_config(config: &AppConfig) -> Self {
+        let global_scripts = &config.scripts.global;
+
         let exact = config
             .routes
             .iter()
@@ -43,6 +50,9 @@ impl RouteTable {
                 let upstream_port = route
                     .upstream_port
                     .unwrap_or_else(|| route.upstream_scheme.default_port());
+                // Merge: global scripts first, then route-specific scripts.
+                let mut scripts = global_scripts.clone();
+                scripts.extend(route.scripts.iter().cloned());
                 let matched = MatchedRoute {
                     incoming_host: route.incoming.clone(),
                     upstream_host: route.upstream.clone(),
@@ -54,6 +64,7 @@ impl RouteTable {
                     upstream_scheme: route.upstream_scheme.clone(),
                     upstream_port,
                     user_agent: route.user_agent.clone(),
+                    scripts,
                 };
                 (route.incoming.clone(), matched)
             })
@@ -80,11 +91,16 @@ impl RouteTable {
                     upstream_scheme: route.upstream_scheme.clone(),
                     upstream_port,
                     user_agent: route.user_agent.clone(),
+                    scripts: route.scripts.clone(),
                 }
             })
             .collect();
 
-        Self { exact, wildcard }
+        Self {
+            exact,
+            wildcard,
+            global_scripts: global_scripts.clone(),
+        }
     }
 
     /// Returns all (upstream, incoming) host pairs from exact routes,
@@ -130,6 +146,9 @@ impl RouteTable {
             if prefix.is_empty() || prefix.contains('.') {
                 return None;
             }
+            // Merge: global scripts first, then route-specific scripts.
+            let mut scripts = self.global_scripts.clone();
+            scripts.extend(rule.scripts.iter().cloned());
             Some(MatchedRoute {
                 incoming_host: host.clone(),
                 upstream_host: format!("{}{}", prefix, rule.upstream_suffix),
@@ -138,6 +157,7 @@ impl RouteTable {
                 upstream_scheme: rule.upstream_scheme.clone(),
                 upstream_port: rule.upstream_port,
                 user_agent: rule.user_agent.clone(),
+                scripts,
             })
         })
     }
