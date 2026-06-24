@@ -71,6 +71,7 @@ impl DnsResolver for HickoryDnsResolver {
                 host: host.to_string(),
                 source: anyhow::Error::new(source),
                 incoming_host: String::new(),
+                language: String::new(),
             })?;
         let addresses: Vec<_> = lookup.collect();
         if addresses.is_empty() {
@@ -78,6 +79,7 @@ impl DnsResolver for HickoryDnsResolver {
                 host: host.to_string(),
                 source: anyhow::anyhow!("no addresses returned"),
                 incoming_host: String::new(),
+                language: String::new(),
             });
         }
         Ok(addresses)

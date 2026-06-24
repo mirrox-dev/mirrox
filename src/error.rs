@@ -14,16 +14,18 @@ pub enum AppError {
         host: String,
         source: anyhow::Error,
         incoming_host: String,
+        language: String,
     },
     #[error("upstream request failed: {0}")]
-    Upstream(anyhow::Error, String),
+    Upstream(anyhow::Error, String, String),
     #[error("upstream timed out")]
-    UpstreamTimeout(String),
+    UpstreamTimeout(String, String),
     #[error("upstream returned {status}")]
     UpstreamError {
         status: StatusCode,
         domain: String,
         incoming_host: String,
+        language: String,
     },
 }
 
@@ -31,21 +33,72 @@ impl AppError {
     /// Attach the incoming host to gateway errors so the error page can display it.
     pub fn with_incoming_host(self, incoming_host: &str) -> Self {
         match self {
-            AppError::Dns { host, source, .. } => AppError::Dns {
+            AppError::Dns {
+                host, source, language, ..
+            } => AppError::Dns {
                 host,
                 source,
                 incoming_host: incoming_host.to_string(),
+                language,
             },
-            AppError::Upstream(err, _) => AppError::Upstream(err, incoming_host.to_string()),
-            AppError::UpstreamTimeout(_) => AppError::UpstreamTimeout(incoming_host.to_string()),
+            AppError::Upstream(err, _, language) => {
+                AppError::Upstream(err, incoming_host.to_string(), language)
+            }
+            AppError::UpstreamTimeout(_, language) => {
+                AppError::UpstreamTimeout(incoming_host.to_string(), language)
+            }
             AppError::UpstreamError {
-                status, domain, ..
+                status, domain, language, ..
             } => AppError::UpstreamError {
                 status,
                 domain,
                 incoming_host: incoming_host.to_string(),
+                language,
             },
             other => other,
+        }
+    }
+
+    /// Set the response language based on the client's Accept-Language header.
+    pub fn with_language(self, language: &str) -> Self {
+        match self {
+            AppError::Dns {
+                host,
+                source,
+                incoming_host,
+                ..
+            } => AppError::Dns {
+                host,
+                source,
+                incoming_host,
+                language: language.to_string(),
+            },
+            AppError::Upstream(err, host, _) => {
+                AppError::Upstream(err, host, language.to_string())
+            }
+            AppError::UpstreamTimeout(host, _) => {
+                AppError::UpstreamTimeout(host, language.to_string())
+            }
+            AppError::UpstreamError {
+                status,
+                domain,
+                incoming_host,
+                ..
+            } => AppError::UpstreamError {
+                status,
+                domain,
+                incoming_host,
+                language: language.to_string(),
+            },
+            other => other,
+        }
+    }
+
+    /// Returns "zh" if the Accept-Language header contains Chinese, "en" otherwise.
+    pub fn detect_language(accept_language: Option<&str>) -> &str {
+        match accept_language {
+            Some(header) if header.to_ascii_lowercase().contains("zh") => "zh",
+            _ => "en",
         }
     }
 }
@@ -70,55 +123,79 @@ impl IntoResponse for AppError {
                 | AppError::UpstreamTimeout(..)
                 | AppError::UpstreamError { .. }
         ) {
+            let language = match &self {
+                AppError::Dns { language, .. } => language.as_str(),
+                AppError::Upstream(_, _, language) => language.as_str(),
+                AppError::UpstreamTimeout(_, language) => language.as_str(),
+                AppError::UpstreamError { language, .. } => language.as_str(),
+                _ => "en",
+            };
+            let is_zh = language == "zh";
+
             let (error_type, badge_label, badge_class, error_desc, domain) = match &self {
-                AppError::Dns { incoming_host, .. } => (
-                    "DNS 解析失败",
-                    "代理错误",
-                    "proxy",
-                    "无法解析上游域名",
-                    incoming_host.as_str(),
-                ),
-                AppError::Upstream(_, incoming_host) => (
-                    "连接失败",
-                    "代理错误",
-                    "proxy",
-                    "无法连接到上游服务器",
-                    incoming_host.as_str(),
-                ),
-                AppError::UpstreamTimeout(incoming_host) => (
-                    "连接超时",
-                    "代理错误",
-                    "proxy",
-                    "上游服务器未在预期时间内响应",
-                    incoming_host.as_str(),
-                ),
+                AppError::Dns { incoming_host, .. } => {
+                    if is_zh {
+                        ("DNS 解析失败", "代理错误", "proxy", "无法解析上游域名", incoming_host.as_str())
+                    } else {
+                        ("DNS resolution failed", "Proxy Error", "proxy", "Unable to resolve upstream domain", incoming_host.as_str())
+                    }
+                }
+                AppError::Upstream(_, incoming_host, _) => {
+                    if is_zh {
+                        ("连接失败", "代理错误", "proxy", "无法连接到上游服务器", incoming_host.as_str())
+                    } else {
+                        ("Connection failed", "Proxy Error", "proxy", "Unable to connect to upstream server", incoming_host.as_str())
+                    }
+                }
+                AppError::UpstreamTimeout(incoming_host, _) => {
+                    if is_zh {
+                        ("连接超时", "代理错误", "proxy", "上游服务器未在预期时间内响应", incoming_host.as_str())
+                    } else {
+                        ("Connection timed out", "Proxy Error", "proxy", "Upstream server did not respond in time", incoming_host.as_str())
+                    }
+                }
                 AppError::UpstreamError {
                     status,
                     domain,
                     incoming_host: _,
+                    ..
                 } => {
-                    let reason = match *status {
-                        StatusCode::BAD_REQUEST => "请求格式有误",
-                        StatusCode::FORBIDDEN => "访问被拒绝",
-                        StatusCode::NOT_FOUND => "请求的资源在上游不存在",
-                        StatusCode::INTERNAL_SERVER_ERROR => "上游服务器内部错误",
-                        StatusCode::BAD_GATEWAY => "上游网关错误",
-                        StatusCode::SERVICE_UNAVAILABLE => "上游服务暂不可用",
-                        StatusCode::GATEWAY_TIMEOUT => "上游响应超时",
-                        _ => "上游返回了错误响应",
-                    };
-                    (
-                        "上游错误",
-                        "上游错误",
-                        "upstream",
-                        reason,
-                        domain.as_str(),
-                    )
+                    if is_zh {
+                        let reason = match *status {
+                            StatusCode::BAD_REQUEST => "请求格式有误",
+                            StatusCode::FORBIDDEN => "访问被拒绝",
+                            StatusCode::NOT_FOUND => "请求的资源在上游不存在",
+                            StatusCode::INTERNAL_SERVER_ERROR => "上游服务器内部错误",
+                            StatusCode::BAD_GATEWAY => "上游网关错误",
+                            StatusCode::SERVICE_UNAVAILABLE => "上游服务暂不可用",
+                            StatusCode::GATEWAY_TIMEOUT => "上游响应超时",
+                            _ => "上游返回了错误响应",
+                        };
+                        ("上游错误", "上游错误", "upstream", reason, domain.as_str())
+                    } else {
+                        let reason = match *status {
+                            StatusCode::BAD_REQUEST => "The request was malformed",
+                            StatusCode::FORBIDDEN => "Access denied by upstream",
+                            StatusCode::NOT_FOUND => "The requested resource was not found on the upstream server",
+                            StatusCode::INTERNAL_SERVER_ERROR => "The upstream server encountered an internal error",
+                            StatusCode::BAD_GATEWAY => "The upstream gateway returned an invalid response",
+                            StatusCode::SERVICE_UNAVAILABLE => "The upstream service is temporarily unavailable",
+                            StatusCode::GATEWAY_TIMEOUT => "The upstream server did not respond in time",
+                            _ => "The upstream server returned an error response",
+                        };
+                        ("Upstream Error", "Upstream Error", "upstream", reason, domain.as_str())
+                    }
                 }
                 _ => unreachable!(),
             };
 
-            let html = ERROR_PAGE_TEMPLATE
+            let template = if is_zh {
+                ERROR_PAGE_TEMPLATE_ZH
+            } else {
+                ERROR_PAGE_TEMPLATE_EN
+            };
+
+            let html = template
                 .replace("{status_code}", status.as_str())
                 .replace(
                     "{status_reason}",
@@ -143,7 +220,7 @@ impl IntoResponse for AppError {
 
 pub type Result<T> = std::result::Result<T, AppError>;
 
-const ERROR_PAGE_TEMPLATE: &str = r#"<!DOCTYPE html>
+const ERROR_PAGE_TEMPLATE_ZH: &str = r#"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -280,6 +357,148 @@ const ERROR_PAGE_TEMPLATE: &str = r#"<!DOCTYPE html>
         <div class="domain">{domain}</div>
         <div class="description">{error_type}。{error_desc}。</div>
         <button class="btn" onclick="location.reload()">重试</button>
+        <div class="footer">mirrox</div>
+    </div>
+</body>
+</html>"#;
+
+const ERROR_PAGE_TEMPLATE_EN: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{status_code} {status_reason} - mirrox</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Display", "Helvetica Neue", sans-serif;
+            background: #F7F6F3;
+            color: #111111;
+            min-height: 100dvh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 32px 20px;
+            -webkit-font-smoothing: antialiased;
+        }
+        .card {
+            background: #FFFFFF;
+            border: 1px solid #EAEAEA;
+            border-radius: 12px;
+            padding: 48px 40px;
+            max-width: 480px;
+            width: 100%;
+        }
+        .status-code {
+            font-family: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+            font-size: 64px;
+            font-weight: 700;
+            letter-spacing: -0.04em;
+            line-height: 1;
+            color: #111111;
+        }
+        .status-reason {
+            font-size: 18px;
+            font-weight: 500;
+            color: #111111;
+            margin-top: 4px;
+        }
+        .divider {
+            border: none;
+            border-top: 1px solid #EAEAEA;
+            margin: 24px 0;
+        }
+        .badge {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            padding: 4px 12px;
+            border-radius: 9999px;
+        }
+        .badge.proxy {
+            background: #FDEBEC;
+            color: #9F2F2D;
+        }
+        .badge.upstream {
+            background: #E1F3FE;
+            color: #1F6C9F;
+        }
+        .domain {
+            font-family: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+            font-size: 14px;
+            color: #787774;
+            margin-top: 12px;
+            word-break: break-all;
+        }
+        .description {
+            font-size: 15px;
+            line-height: 1.6;
+            color: #787774;
+            margin-top: 16px;
+        }
+        .btn {
+            display: inline-block;
+            margin-top: 24px;
+            padding: 10px 24px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #FFFFFF;
+            background: #111111;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background 0.15s ease;
+            -webkit-appearance: none;
+        }
+        .btn:hover {
+            background: #333333;
+        }
+        .btn:active {
+            transform: scale(0.98);
+        }
+        .footer {
+            margin-top: 32px;
+            padding-top: 20px;
+            border-top: 1px solid #EAEAEA;
+            font-size: 12px;
+            color: #787774;
+            font-family: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+        }
+        @media (max-width: 480px) {
+            .card { padding: 32px 24px; }
+            .status-code { font-size: 48px; }
+        }
+        @media (prefers-color-scheme: dark) {
+            body { background: #1A1A1A; color: #E8E8E8; }
+            .card {
+                background: #242424;
+                border-color: #333333;
+            }
+            .status-code { color: #E8E8E8; }
+            .status-reason { color: #E8E8E8; }
+            .divider { border-color: #333333; }
+            .badge.proxy { background: #3D2222; color: #F0A0A0; }
+            .badge.upstream { background: #1C2D3A; color: #8BC8F0; }
+            .domain { color: #9A9A9A; }
+            .description { color: #9A9A9A; }
+            .btn { color: #111111; background: #E8E8E8; }
+            .btn:hover { background: #D0D0D0; }
+            .footer { border-color: #333333; color: #9A9A9A; }
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="status-code">{status_code}</div>
+        <div class="status-reason">{status_reason}</div>
+        <hr class="divider">
+        <span class="badge {badge_class}">{badge_label}</span>
+        <div class="domain">{domain}</div>
+        <div class="description">{error_type}: {error_desc}.</div>
+        <button class="btn" onclick="location.reload()">Retry</button>
         <div class="footer">mirrox</div>
     </div>
 </body>

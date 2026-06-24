@@ -58,16 +58,21 @@ pub async fn proxy_handler(
         .ok_or_else(|| AppError::RouteNotFound(host.to_string()))?;
 
     let incoming_host = host.to_string();
+    let accept_language = request
+        .headers()
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok());
+    let language = AppError::detect_language(accept_language).to_string();
 
     if is_websocket_upgrade(request.headers()) {
         return forward_websocket(state, route, request)
             .await
-            .map_err(|e| e.with_incoming_host(&incoming_host));
+            .map_err(|e| e.with_incoming_host(&incoming_host).with_language(&language));
     }
 
     forward_http(state, route, request)
         .await
-        .map_err(|e| e.with_incoming_host(&incoming_host))
+        .map_err(|e| e.with_incoming_host(&incoming_host).with_language(&language))
 }
 
 fn upstream_authority(route: &MatchedRoute) -> String {
@@ -101,7 +106,7 @@ async fn forward_http(
         path_and_query
     )
     .parse()
-    .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
+    .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
 
     let (mut parts, body) = request.into_parts();
     parts.uri = upstream_uri;
@@ -137,7 +142,7 @@ async fn forward_http(
         let future: Pin<Box<dyn Future<Output = Result<_, AppError>> + Send>> =
             Box::pin(async move {
                 let host = uri.host().ok_or_else(|| {
-                    AppError::Upstream(anyhow::anyhow!("missing upstream host"), String::new())
+                    AppError::Upstream(anyhow::anyhow!("missing upstream host"), String::new(), String::new())
                 })?;
                 let port = uri.port_u16().unwrap_or(route.upstream_port);
                 let stream = timeout(
@@ -145,7 +150,7 @@ async fn forward_http(
                     connector.connect(route.upstream_proxy.as_deref(), host, port),
                 )
                 .await
-                .map_err(|_| AppError::UpstreamTimeout(String::new()))??;
+                .map_err(|_| AppError::UpstreamTimeout(String::new(), String::new()))??;
                 let stream = timeout(
                     connect_timeout,
                     maybe_tls_stream(
@@ -155,7 +160,7 @@ async fn forward_http(
                     ),
                 )
                 .await
-                .map_err(|_| AppError::UpstreamTimeout(String::new()))??;
+                .map_err(|_| AppError::UpstreamTimeout(String::new(), String::new()))??;
                 Ok(boxed_body_io(stream))
             });
         future
@@ -165,8 +170,8 @@ async fn forward_http(
     let request_timeout = Duration::from_millis(state.config.server.request_timeout_ms);
     let upstream_response = timeout(request_timeout, client.request(upstream_request))
         .await
-        .map_err(|_| AppError::UpstreamTimeout(String::new()))?
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
+        .map_err(|_| AppError::UpstreamTimeout(String::new(), String::new()))?
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
 
     rewrite_response(state, route, upstream_response).await
 }
@@ -198,7 +203,7 @@ async fn forward_websocket(
     );
     let mut upstream_request = upstream_url
         .into_client_request()
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
     let connector = UpstreamConnector::new(state.dns.clone());
     let upstream_proxy = route.upstream_proxy.clone();
     let upstream_host = route.upstream_host.clone();
@@ -228,7 +233,7 @@ async fn forward_websocket(
         .and_then(|value| value.to_str().ok())
         .map(|value| derive_accept_key(value.as_bytes()))
         .ok_or_else(|| {
-            AppError::Upstream(anyhow::anyhow!("missing Sec-WebSocket-Key"), String::new())
+            AppError::Upstream(anyhow::anyhow!("missing Sec-WebSocket-Key"), String::new(), String::new())
         })?;
     let upgraded = hyper::upgrade::on(request);
     tokio::spawn(async move {
@@ -267,7 +272,7 @@ async fn forward_websocket(
         .header(UPGRADE, "websocket")
         .header(SEC_WEBSOCKET_ACCEPT, accept_key)
         .body(Body::empty())
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))
+        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))
 }
 
 async fn rewrite_response(
@@ -285,8 +290,10 @@ async fn rewrite_response(
         return Err(AppError::UpstreamError {
             status: parts.status,
             domain: route.upstream_host.clone(),
-            // incoming_host is filled in by with_incoming_host() in proxy_handler
+            // incoming_host and language are filled in by with_incoming_host() and
+            // with_language() in proxy_handler
             incoming_host: String::new(),
+            language: String::new(),
         });
     }
 
@@ -317,7 +324,7 @@ async fn rewrite_response(
         state.config.rewrite.max_buffer_bytes,
     )
     .await
-    .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
+    .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
 
     let encoding = parts
         .headers
@@ -330,7 +337,7 @@ async fn rewrite_response(
             let mut decompressed = Vec::new();
             decoder
                 .read_to_end(&mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
             parts.headers.remove("content-encoding");
             decompressed
         }
@@ -339,7 +346,7 @@ async fn rewrite_response(
             let mut decompressed = Vec::new();
             decoder
                 .read_to_end(&mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
             parts.headers.remove("content-encoding");
             decompressed
         }
@@ -347,7 +354,7 @@ async fn rewrite_response(
             let mut decompressed = Vec::new();
             let mut reader: &[u8] = bytes.as_ref();
             brotli::BrotliDecompress(&mut reader, &mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new()))?;
+                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
             parts.headers.remove("content-encoding");
             decompressed
         }
