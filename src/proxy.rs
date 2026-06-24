@@ -276,6 +276,20 @@ async fn rewrite_response(
     response: Response<hyper::body::Incoming>,
 ) -> Result<Response<Body>, AppError> {
     let (mut parts, body) = response.into_parts();
+
+    // Intercept upstream error responses (4xx/5xx) and return a custom error
+    // page instead of forwarding the upstream's error to the client.
+    if parts.status.is_client_error() || parts.status.is_server_error() {
+        // Drain the body so the upstream connection is cleanly released.
+        drop(body);
+        return Err(AppError::UpstreamError {
+            status: parts.status,
+            domain: route.upstream_host.clone(),
+            // incoming_host is filled in by with_incoming_host() in proxy_handler
+            incoming_host: String::new(),
+        });
+    }
+
     let rewrite_pairs = state.routes.rewrite_pairs_for(&route);
     rewrite_response_headers(&mut parts.headers, &route, &rewrite_pairs);
 

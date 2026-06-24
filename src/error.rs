@@ -1,3 +1,4 @@
+use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror::Error;
@@ -18,6 +19,12 @@ pub enum AppError {
     Upstream(anyhow::Error, String),
     #[error("upstream timed out")]
     UpstreamTimeout(String),
+    #[error("upstream returned {status}")]
+    UpstreamError {
+        status: StatusCode,
+        domain: String,
+        incoming_host: String,
+    },
 }
 
 impl AppError {
@@ -31,6 +38,13 @@ impl AppError {
             },
             AppError::Upstream(err, _) => AppError::Upstream(err, incoming_host.to_string()),
             AppError::UpstreamTimeout(_) => AppError::UpstreamTimeout(incoming_host.to_string()),
+            AppError::UpstreamError {
+                status, domain, ..
+            } => AppError::UpstreamError {
+                status,
+                domain,
+                incoming_host: incoming_host.to_string(),
+            },
             other => other,
         }
     }
@@ -44,17 +58,63 @@ impl IntoResponse for AppError {
             AppError::Dns { .. } => StatusCode::BAD_GATEWAY,
             AppError::Upstream(..) => StatusCode::BAD_GATEWAY,
             AppError::UpstreamTimeout(..) => StatusCode::GATEWAY_TIMEOUT,
+            AppError::UpstreamError { status, .. } => *status,
         };
 
-        // For gateway errors (502/504), return a modern HTML error page
+        // For gateway errors (502/504) and upstream errors (4xx/5xx), return a
+        // custom HTML error page instead of forwarding the upstream response.
         if matches!(
             self,
-            AppError::Dns { .. } | AppError::Upstream(..) | AppError::UpstreamTimeout(..)
+            AppError::Dns { .. }
+                | AppError::Upstream(..)
+                | AppError::UpstreamTimeout(..)
+                | AppError::UpstreamError { .. }
         ) {
-            let (error_type, incoming_host) = match &self {
-                AppError::Dns { incoming_host, .. } => ("DNS 解析失败", incoming_host.as_str()),
-                AppError::Upstream(_, incoming_host) => ("连接失败", incoming_host.as_str()),
-                AppError::UpstreamTimeout(incoming_host) => ("连接超时", incoming_host.as_str()),
+            let (error_type, badge_label, badge_class, error_desc, domain) = match &self {
+                AppError::Dns { incoming_host, .. } => (
+                    "DNS 解析失败",
+                    "代理错误",
+                    "proxy",
+                    "无法解析上游域名",
+                    incoming_host.as_str(),
+                ),
+                AppError::Upstream(_, incoming_host) => (
+                    "连接失败",
+                    "代理错误",
+                    "proxy",
+                    "无法连接到上游服务器",
+                    incoming_host.as_str(),
+                ),
+                AppError::UpstreamTimeout(incoming_host) => (
+                    "连接超时",
+                    "代理错误",
+                    "proxy",
+                    "上游服务器未在预期时间内响应",
+                    incoming_host.as_str(),
+                ),
+                AppError::UpstreamError {
+                    status,
+                    domain,
+                    incoming_host: _,
+                } => {
+                    let reason = match *status {
+                        StatusCode::BAD_REQUEST => "请求格式有误",
+                        StatusCode::FORBIDDEN => "访问被拒绝",
+                        StatusCode::NOT_FOUND => "请求的资源在上游不存在",
+                        StatusCode::INTERNAL_SERVER_ERROR => "上游服务器内部错误",
+                        StatusCode::BAD_GATEWAY => "上游网关错误",
+                        StatusCode::SERVICE_UNAVAILABLE => "上游服务暂不可用",
+                        StatusCode::GATEWAY_TIMEOUT => "上游响应超时",
+                        _ => "上游返回了错误响应",
+                    };
+                    (
+                        "上游错误",
+                        "上游错误",
+                        "upstream",
+                        reason,
+                        domain.as_str(),
+                    )
+                }
                 _ => unreachable!(),
             };
 
@@ -65,12 +125,15 @@ impl IntoResponse for AppError {
                     status.canonical_reason().unwrap_or("Error"),
                 )
                 .replace("{error_type}", error_type)
-                .replace("{domain}", incoming_host);
+                .replace("{error_desc}", error_desc)
+                .replace("{domain}", domain)
+                .replace("{badge_label}", badge_label)
+                .replace("{badge_class}", badge_class);
 
             return Response::builder()
                 .status(status)
                 .header("content-type", "text/html; charset=utf-8")
-                .body(axum::body::Body::from(html))
+                .body(Body::from(html))
                 .unwrap();
         }
 
@@ -85,100 +148,139 @@ const ERROR_PAGE_TEMPLATE: &str = r#"<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{status_code} {status_reason}</title>
+    <title>{status_code} {status_reason} - mirrox</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Display", "Helvetica Neue", sans-serif;
+            background: #F7F6F3;
+            color: #111111;
+            min-height: 100dvh;
             display: flex;
             align-items: center;
             justify-content: center;
-            padding: 20px;
+            padding: 32px 20px;
+            -webkit-font-smoothing: antialiased;
         }
         .card {
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            background: #FFFFFF;
+            border: 1px solid #EAEAEA;
+            border-radius: 12px;
             padding: 48px 40px;
-            max-width: 520px;
+            max-width: 480px;
             width: 100%;
-            text-align: center;
         }
-        .icon {
-            width: 80px;
-            height: 80px;
-            background: #fff3cd;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 24px;
-        }
-        .icon svg {
-            width: 40px;
-            height: 40px;
-            color: #856404;
-        }
-        h1 {
-            font-size: 24px;
+        .status-code {
+            font-family: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+            font-size: 64px;
             font-weight: 700;
-            color: #1a1a2e;
-            margin-bottom: 8px;
+            letter-spacing: -0.04em;
+            line-height: 1;
+            color: #111111;
+        }
+        .status-reason {
+            font-size: 18px;
+            font-weight: 500;
+            color: #111111;
+            margin-top: 4px;
+        }
+        .divider {
+            border: none;
+            border-top: 1px solid #EAEAEA;
+            margin: 24px 0;
+        }
+        .badge {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            padding: 4px 12px;
+            border-radius: 9999px;
+        }
+        .badge.proxy {
+            background: #FDEBEC;
+            color: #9F2F2D;
+        }
+        .badge.upstream {
+            background: #E1F3FE;
+            color: #1F6C9F;
         }
         .domain {
-            font-size: 18px;
-            color: #667eea;
-            font-weight: 600;
-            margin-bottom: 24px;
+            font-family: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+            font-size: 14px;
+            color: #787774;
+            margin-top: 12px;
             word-break: break-all;
         }
-        .error-badge {
+        .description {
+            font-size: 15px;
+            line-height: 1.6;
+            color: #787774;
+            margin-top: 16px;
+        }
+        .btn {
             display: inline-block;
-            background: #fee2e2;
-            color: #dc2626;
-            padding: 6px 16px;
-            border-radius: 20px;
+            margin-top: 24px;
+            padding: 10px 24px;
             font-size: 14px;
             font-weight: 500;
-            margin-bottom: 24px;
+            color: #FFFFFF;
+            background: #111111;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background 0.15s ease;
+            -webkit-appearance: none;
         }
-        .message {
-            font-size: 15px;
-            color: #555;
-            line-height: 1.6;
-            margin-bottom: 32px;
+        .btn:hover {
+            background: #333333;
+        }
+        .btn:active {
+            transform: scale(0.98);
         }
         .footer {
-            font-size: 13px;
-            color: #999;
-            border-top: 1px solid #eee;
+            margin-top: 32px;
             padding-top: 20px;
+            border-top: 1px solid #EAEAEA;
+            font-size: 12px;
+            color: #787774;
+            font-family: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
         }
         @media (max-width: 480px) {
             .card { padding: 32px 24px; }
-            h1 { font-size: 20px; }
-            .domain { font-size: 16px; }
+            .status-code { font-size: 48px; }
+        }
+        @media (prefers-color-scheme: dark) {
+            body { background: #1A1A1A; color: #E8E8E8; }
+            .card {
+                background: #242424;
+                border-color: #333333;
+            }
+            .status-code { color: #E8E8E8; }
+            .status-reason { color: #E8E8E8; }
+            .divider { border-color: #333333; }
+            .badge.proxy { background: #3D2222; color: #F0A0A0; }
+            .badge.upstream { background: #1C2D3A; color: #8BC8F0; }
+            .domain { color: #9A9A9A; }
+            .description { color: #9A9A9A; }
+            .btn { color: #111111; background: #E8E8E8; }
+            .btn:hover { background: #D0D0D0; }
+            .footer { border-color: #333333; color: #9A9A9A; }
         }
     </style>
 </head>
 <body>
     <div class="card">
-        <div class="icon">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-            </svg>
-        </div>
-        <h1>无法访问此网站</h1>
+        <div class="status-code">{status_code}</div>
+        <div class="status-reason">{status_reason}</div>
+        <hr class="divider">
+        <span class="badge {badge_class}">{badge_label}</span>
         <div class="domain">{domain}</div>
-        <div class="error-badge">⚠ {error_type}</div>
-        <div class="message">
-            当前网站暂时无法响应您的请求。这可能是服务器维护、网络波动或配置问题导致的，请稍后再试。
-        </div>
-        <div class="footer">
-            如果问题持续存在，请联系该网站的管理员获取帮助。
-        </div>
+        <div class="description">{error_type}。{error_desc}。</div>
+        <button class="btn" onclick="location.reload()">重试</button>
+        <div class="footer">mirrox</div>
     </div>
 </body>
 </html>"#;
