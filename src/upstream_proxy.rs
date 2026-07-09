@@ -99,7 +99,7 @@ impl UpstreamConnector {
         let addresses = self.dns.resolve(host, port).await?;
         TcpStream::connect(addresses[0])
             .await
-            .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))
+            .map_err(AppError::upstream)
     }
 }
 
@@ -173,11 +173,8 @@ fn tls_root_store() -> Result<RootCertStore, AppError> {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
     if let Ok(path) = std::env::var("MIRROX_EXTRA_ROOT_CERT_DER") {
-        let bytes = std::fs::read(path)
-            .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
-        root_store
-            .add(bytes.into())
-            .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        let bytes = std::fs::read(path).map_err(AppError::upstream)?;
+        root_store.add(bytes.into()).map_err(AppError::upstream)?;
     }
     Ok(root_store)
 }
@@ -192,17 +189,15 @@ pub async fn tls_stream(
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
     let server_name = ServerName::try_from(upstream_host.to_string()).map_err(|err| {
-        AppError::Upstream(
-            anyhow::anyhow!("invalid TLS server name {upstream_host}: {err}"),
-            String::new(),
-        String::new(),
-        )
+        AppError::upstream(anyhow::anyhow!(
+            "invalid TLS server name {upstream_host}: {err}"
+        ))
     })?;
     connector
         .connect(server_name, stream)
         .await
         .map(|stream| UpstreamStream::Tls(Box::new(stream)))
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))
+        .map_err(AppError::upstream)
 }
 
 pub async fn maybe_tls_stream(
@@ -219,9 +214,7 @@ pub async fn maybe_tls_stream(
 
 async fn connect_proxy_tcp(proxy: &ProxyTarget) -> Result<TcpStream, AppError> {
     let addr = format!("{}:{}", proxy.host, proxy.port);
-    TcpStream::connect(addr)
-        .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))
+    TcpStream::connect(addr).await.map_err(AppError::upstream)
 }
 
 async fn connect_http_proxy(
@@ -244,40 +237,31 @@ async fn connect_http_proxy(
     stream
         .write_all(request.as_bytes())
         .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(AppError::upstream)?;
 
     let mut response = Vec::new();
     let mut byte = [0_u8; 1];
     while !response.ends_with(b"\r\n\r\n") {
-        let read = stream
-            .read(&mut byte)
-            .await
-            .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        let read = stream.read(&mut byte).await.map_err(AppError::upstream)?;
         if read == 0 {
-            return Err(AppError::Upstream(
-                anyhow::anyhow!("http proxy closed during CONNECT"),
-                String::new(),
-            String::new(),
-            ));
+            return Err(AppError::upstream(anyhow::anyhow!(
+                "http proxy closed during CONNECT"
+            )));
         }
         response.push(byte[0]);
         if response.len() > 8192 {
-            return Err(AppError::Upstream(
-                anyhow::anyhow!("http proxy CONNECT response too large"),
-                String::new(),
-            String::new(),
-            ));
+            return Err(AppError::upstream(anyhow::anyhow!(
+                "http proxy CONNECT response too large"
+            )));
         }
     }
     let response = String::from_utf8_lossy(&response);
     if response.starts_with("HTTP/1.1 2") || response.starts_with("HTTP/1.0 2") {
         Ok(stream)
     } else {
-        Err(AppError::Upstream(
-            anyhow::anyhow!("http proxy CONNECT failed: {response}"),
-            String::new(),
-        String::new(),
-        ))
+        Err(AppError::upstream(anyhow::anyhow!(
+            "http proxy CONNECT failed: {response}"
+        )))
     }
 }
 
@@ -296,45 +280,37 @@ async fn connect_socks5_proxy(
     stream
         .write_all(greeting)
         .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(AppError::upstream)?;
     let mut method = [0_u8; 2];
     stream
         .read_exact(&mut method)
         .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(AppError::upstream)?;
     if method[0] != 0x05 {
-        return Err(AppError::Upstream(
-            anyhow::anyhow!("invalid SOCKS5 proxy response"),
-            String::new(),
-        String::new(),
-        ));
+        return Err(AppError::upstream(anyhow::anyhow!(
+            "invalid SOCKS5 proxy response"
+        )));
     }
     match method[1] {
         0x00 => {}
         0x02 => authenticate_socks5(&mut stream, &proxy).await?,
         0xff => {
-            return Err(AppError::Upstream(
-                anyhow::anyhow!("SOCKS5 proxy rejected auth methods"),
-                String::new(),
-            String::new(),
-            ))
+            return Err(AppError::upstream(anyhow::anyhow!(
+                "SOCKS5 proxy rejected auth methods"
+            )))
         }
         other => {
-            return Err(AppError::Upstream(
-                anyhow::anyhow!("unsupported SOCKS5 auth method {other}"),
-                String::new(),
-            String::new(),
-            ))
+            return Err(AppError::upstream(anyhow::anyhow!(
+                "unsupported SOCKS5 auth method {other}"
+            )))
         }
     }
 
     let host = upstream_host.as_bytes();
     if host.len() > u8::MAX as usize {
-        return Err(AppError::Upstream(
-            anyhow::anyhow!("SOCKS5 upstream host too long"),
-            String::new(),
-        String::new(),
-        ));
+        return Err(AppError::upstream(anyhow::anyhow!(
+            "SOCKS5 upstream host too long"
+        )));
     }
     let mut request = Vec::with_capacity(7 + host.len());
     request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host.len() as u8]);
@@ -343,19 +319,15 @@ async fn connect_socks5_proxy(
     stream
         .write_all(&request)
         .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(AppError::upstream)?;
 
     let mut header = [0_u8; 4];
     stream
         .read_exact(&mut header)
         .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(AppError::upstream)?;
     if header[0] != 0x05 || header[1] != 0x00 {
-        return Err(AppError::Upstream(
-            anyhow::anyhow!("SOCKS5 CONNECT failed"),
-            String::new(),
-        String::new(),
-        ));
+        return Err(AppError::upstream(anyhow::anyhow!("SOCKS5 CONNECT failed")));
     }
     read_socks5_bound_address(&mut stream, header[3]).await?;
     Ok(stream)
@@ -365,11 +337,9 @@ async fn authenticate_socks5(stream: &mut TcpStream, proxy: &ProxyTarget) -> Res
     let username = proxy.username.as_deref().unwrap_or("").as_bytes();
     let password = proxy.password.as_deref().unwrap_or("").as_bytes();
     if username.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
-        return Err(AppError::Upstream(
-            anyhow::anyhow!("SOCKS5 credentials too long"),
-            String::new(),
-        String::new(),
-        ));
+        return Err(AppError::upstream(anyhow::anyhow!(
+            "SOCKS5 credentials too long"
+        )));
     }
     let mut request = Vec::with_capacity(3 + username.len() + password.len());
     request.push(0x01);
@@ -380,20 +350,18 @@ async fn authenticate_socks5(stream: &mut TcpStream, proxy: &ProxyTarget) -> Res
     stream
         .write_all(&request)
         .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(AppError::upstream)?;
     let mut response = [0_u8; 2];
     stream
         .read_exact(&mut response)
         .await
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(AppError::upstream)?;
     if response == [0x01, 0x00] {
         Ok(())
     } else {
-        Err(AppError::Upstream(
-            anyhow::anyhow!("SOCKS5 authentication failed"),
-            String::new(),
-        String::new(),
-        ))
+        Err(AppError::upstream(anyhow::anyhow!(
+            "SOCKS5 authentication failed"
+        )))
     }
 }
 
@@ -404,33 +372,31 @@ async fn read_socks5_bound_address(stream: &mut TcpStream, atyp: u8) -> Result<(
             stream
                 .read_exact(&mut ignored)
                 .await
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+                .map_err(AppError::upstream)?;
         }
         0x03 => {
             let mut len = [0_u8; 1];
             stream
                 .read_exact(&mut len)
                 .await
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+                .map_err(AppError::upstream)?;
             let mut ignored = vec![0_u8; len[0] as usize + 2];
             stream
                 .read_exact(&mut ignored)
                 .await
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+                .map_err(AppError::upstream)?;
         }
         0x04 => {
             let mut ignored = [0_u8; 18];
             stream
                 .read_exact(&mut ignored)
                 .await
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+                .map_err(AppError::upstream)?;
         }
         other => {
-            return Err(AppError::Upstream(
-                anyhow::anyhow!("unsupported SOCKS5 address type {other}"),
-                String::new(),
-            String::new(),
-            ))
+            return Err(AppError::upstream(anyhow::anyhow!(
+                "unsupported SOCKS5 address type {other}"
+            )))
         }
     }
     Ok(())

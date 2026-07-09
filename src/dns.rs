@@ -1,8 +1,13 @@
 use crate::config::{DnsConfig, DnsMode};
 use crate::error::{AppError, Result};
 use async_trait::async_trait;
-use std::net::SocketAddr;
+use hickory_resolver::config::{
+    NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig, ResolverOpts,
+};
+use hickory_resolver::TokioAsyncResolver;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[async_trait]
 pub trait DnsResolver: Send + Sync + 'static {
@@ -44,42 +49,120 @@ impl ResolverFactory {
     }
 
     pub fn build(self) -> Result<SharedDnsResolver> {
-        Ok(Arc::new(HickoryDnsResolver::new(self.config)?))
+        let resolver = build_hickory_resolver(&self.config)?;
+        Ok(Arc::new(HickoryDnsResolver { resolver }))
     }
 }
 
 pub struct HickoryDnsResolver {
-    _config: DnsConfig,
+    resolver: TokioAsyncResolver,
 }
 
-impl HickoryDnsResolver {
-    pub fn new(config: DnsConfig) -> Result<Self> {
-        match config.mode {
-            DnsMode::Udp | DnsMode::Tcp | DnsMode::Dot | DnsMode::Doh => {
-                Ok(Self { _config: config })
-            }
-        }
+struct ParsedServer {
+    socket_addr: SocketAddr,
+    protocol: Protocol,
+    tls_dns_name: Option<String>,
+}
+
+fn resolve_host_port(host: &str, port: u16) -> Result<SocketAddr> {
+    (host, port)
+        .to_socket_addrs()
+        .map_err(|err| AppError::Config(format!("failed to resolve DNS server {host}: {err}")))?
+        .next()
+        .ok_or_else(|| AppError::Config(format!("no addresses for DNS server {host}")))
+}
+
+fn parse_server(value: &str, mode: &DnsMode) -> Result<ParsedServer> {
+    // URL format: https://cloudflare-dns.com/dns-query, tls://dns.google
+    if let Ok(url) = url::Url::parse(value) {
+        let host = url
+            .host_str()
+            .ok_or_else(|| AppError::Config(format!("missing host in DNS server URL: {value}")))?;
+        let port = url.port_or_known_default().unwrap_or(match mode {
+            DnsMode::Dot => 853,
+            DnsMode::Doh => 443,
+            _ => 53,
+        });
+        let socket_addr = resolve_host_port(host, port)?;
+        let protocol = match mode {
+            DnsMode::Doh => Protocol::Https,
+            DnsMode::Dot => Protocol::Tls,
+            DnsMode::Udp => Protocol::Udp,
+            DnsMode::Tcp => Protocol::Tcp,
+        };
+        let tls_dns_name = match mode {
+            DnsMode::Doh | DnsMode::Dot => Some(host.to_string()),
+            _ => None,
+        };
+        return Ok(ParsedServer {
+            socket_addr,
+            protocol,
+            tls_dns_name,
+        });
     }
+
+    // IP:port format
+    let socket_addr: SocketAddr = value
+        .parse()
+        .map_err(|err| AppError::Config(format!("invalid DNS server {value}: {err}")))?;
+    let protocol = match mode {
+        DnsMode::Udp => Protocol::Udp,
+        DnsMode::Tcp => Protocol::Tcp,
+        DnsMode::Dot => Protocol::Tls,
+        DnsMode::Doh => Protocol::Https,
+    };
+    Ok(ParsedServer {
+        socket_addr,
+        protocol,
+        tls_dns_name: None,
+    })
+}
+
+fn build_hickory_resolver(config: &DnsConfig) -> Result<TokioAsyncResolver> {
+    let mut group = NameServerConfigGroup::new();
+    for server in &config.servers {
+        let parsed = parse_server(server, &config.mode)?;
+        let mut ns_config = NameServerConfig::new(parsed.socket_addr, parsed.protocol);
+        if let Some(tls_name) = parsed.tls_dns_name {
+            ns_config.tls_dns_name = Some(tls_name);
+        }
+        group.push(ns_config);
+    }
+
+    let resolver_config = ResolverConfig::from_parts(None, vec![], group);
+    let mut resolver_opts = ResolverOpts::default();
+    resolver_opts.timeout = Duration::from_millis(config.timeout_ms);
+    resolver_opts.positive_min_ttl = Some(Duration::from_secs(config.cache_min_ttl_seconds));
+    resolver_opts.positive_max_ttl = Some(Duration::from_secs(config.cache_max_ttl_seconds));
+    resolver_opts.negative_min_ttl = Some(Duration::from_secs(config.cache_min_ttl_seconds));
+    resolver_opts.negative_max_ttl = Some(Duration::from_secs(config.cache_max_ttl_seconds));
+
+    let resolver = TokioAsyncResolver::tokio(resolver_config, resolver_opts);
+    Ok(resolver)
 }
 
 #[async_trait]
 impl DnsResolver for HickoryDnsResolver {
     async fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
-        let lookup = tokio::net::lookup_host((host, port))
+        let lookups = self
+            .resolver
+            .lookup_ip(host)
             .await
             .map_err(|source| AppError::Dns {
                 host: host.to_string(),
                 source: anyhow::Error::new(source),
                 incoming_host: String::new(),
                 language: String::new(),
+                error_status_override: None,
             })?;
-        let addresses: Vec<_> = lookup.collect();
+        let addresses: Vec<_> = lookups.iter().map(|ip| SocketAddr::new(ip, port)).collect();
         if addresses.is_empty() {
             return Err(AppError::Dns {
                 host: host.to_string(),
-                source: anyhow::anyhow!("no addresses returned"),
+                source: anyhow::anyhow!("no addresses returned for {host}"),
                 incoming_host: String::new(),
                 language: String::new(),
+                error_status_override: None,
             });
         }
         Ok(addresses)
@@ -99,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_doh_config_shape() {
+    fn accepts_doh_config_with_url() {
         let config = DnsConfig {
             mode: DnsMode::Doh,
             servers: vec!["https://cloudflare-dns.com/dns-query".to_string()],
@@ -109,5 +192,16 @@ mod tests {
         };
 
         assert!(ResolverFactory::new(config).is_ok());
+    }
+
+    #[test]
+    fn accepts_udp_config_with_ip() {
+        let config = DnsConfig {
+            mode: DnsMode::Udp,
+            servers: vec!["8.8.8.8:53".to_string()],
+            ..Default::default()
+        };
+        let factory = ResolverFactory::new(config).unwrap();
+        assert!(factory.build().is_ok());
     }
 }

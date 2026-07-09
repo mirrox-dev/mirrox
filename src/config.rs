@@ -115,6 +115,13 @@ pub struct ServerConfig {
     pub connect_timeout_ms: u64,
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
+    /// When set, upstream error pages (502/504/etc.) use this status code
+    /// instead of the actual error status. Useful when mirrox sits behind a
+    /// CDN or reverse proxy that intercepts 5xx responses and replaces the
+    /// body with its own branded error page. Set to 200 to tunnel the custom
+    /// error page through the fronting proxy unmodified.
+    #[serde(default)]
+    pub proxy_error_status: Option<u16>,
 }
 
 impl Default for ServerConfig {
@@ -128,6 +135,7 @@ impl Default for ServerConfig {
             tls_key: None,
             connect_timeout_ms: default_connect_timeout_ms(),
             request_timeout_ms: default_request_timeout_ms(),
+            proxy_error_status: None,
         }
     }
 }
@@ -302,6 +310,26 @@ impl AppConfig {
             validate_upstream_port(route.upstream_port)?;
             if let Some(proxy) = &route.upstream_proxy {
                 validate_upstream_proxy_value(proxy)?;
+            }
+        }
+        // Detect duplicate exact routes (incoming host collisions).
+        let mut seen = std::collections::HashSet::new();
+        for route in &self.routes {
+            if !seen.insert(&route.incoming) {
+                return Err(AppError::Config(format!(
+                    "duplicate route for incoming host \"{}\"",
+                    route.incoming
+                )));
+            }
+        }
+        // Detect duplicate wildcard routes.
+        seen.clear();
+        for route in &self.wildcard_routes {
+            if !seen.insert(&route.incoming_suffix) {
+                return Err(AppError::Config(format!(
+                    "duplicate wildcard route for suffix \"{}\"",
+                    route.incoming_suffix
+                )));
             }
         }
         Ok(())

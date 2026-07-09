@@ -1,6 +1,5 @@
 use crate::config::{normalize_host, AppConfig, BodyRewriteMode, UpstreamScheme};
-use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchedRoute {
@@ -106,32 +105,45 @@ impl RouteTable {
     /// Returns all (upstream, incoming) host pairs from exact routes,
     /// sorted by upstream host length descending to prevent substring collisions
     /// (e.g. replacing "bgm.tv" before "lain.bgm.tv" would corrupt the latter).
+    /// Results are deterministic: when two routes share the same upstream,
+    /// the one that appears first in the config wins.
     pub fn all_rewrite_pairs(&self) -> Vec<(String, String)> {
+        let mut seen_upstreams = HashSet::new();
         let mut pairs: Vec<(String, String)> = self
             .exact
             .values()
+            .filter(|r| seen_upstreams.insert(r.upstream_host.clone()))
             .map(|r| (r.upstream_host.clone(), r.incoming_host.clone()))
             .collect();
-        pairs.sort_by_key(|a| Reverse(a.0.len()));
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
         pairs
     }
 
-    /// Rewrite pairs to apply to a response served for `route`: every exact
-    /// route's (upstream, incoming) mapping, plus `route`'s own mapping when it
-    /// is not already present (a wildcard match is not in the exact table).
-    /// Used to rewrite upstream hosts out of response `Location` headers and
-    /// bodies, including cross-domain references to sibling upstreams (e.g. a
-    /// redirect from `api.bgm.tv` pointing at `lain.bgm.tv`). Sorted by upstream
-    /// host length descending to prevent substring collisions.
+    /// Rewrite pairs to apply to a response served for `route`.
+    ///
+    /// Includes the current route's own (upstream, incoming) mapping plus
+    /// every exact route's mapping for *different* upstreams — used to rewrite
+    /// cross-domain references in `Location` headers and bodies (e.g. a redirect
+    /// from `api.bgm.tv` pointing at `lain.bgm.tv`).
+    ///
+    /// When multiple incoming hosts share the same upstream, the current
+    /// route's mapping takes priority; conflicting entries from other routes
+    /// with the same upstream are excluded so they don't overwrite each other.
+    ///
+    /// Sorted by upstream host length descending to prevent substring collisions.
     pub fn rewrite_pairs_for(&self, route: &MatchedRoute) -> Vec<(String, String)> {
-        let mut pairs = self.all_rewrite_pairs();
-        if !pairs
-            .iter()
-            .any(|(upstream, _)| upstream == &route.upstream_host)
-        {
-            pairs.push((route.upstream_host.clone(), route.incoming_host.clone()));
-            pairs.sort_by_key(|pair| Reverse(pair.0.len()));
-        }
+        let mut pairs: Vec<(String, String)> = self
+            .exact
+            .values()
+            .filter(|r| r.upstream_host != route.upstream_host)
+            .map(|r| (r.upstream_host.clone(), r.incoming_host.clone()))
+            .collect();
+        // Deduplicate by upstream: keep the first encountered (config order).
+        let mut seen = HashSet::new();
+        pairs.retain(|(upstream, _)| seen.insert(upstream.clone()));
+        // Always include the current route's own mapping.
+        pairs.push((route.upstream_host.clone(), route.incoming_host.clone()));
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
         pairs
     }
 

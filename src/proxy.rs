@@ -1,6 +1,6 @@
 use crate::config::{AppConfig, BodyRewriteMode, UpstreamScheme};
 use crate::dns::SharedDnsResolver;
-use crate::error::AppError;
+use crate::error::{AppError, ErrorContext};
 use crate::rewrite::{
     is_rewritable_content_type, registrable_suffix, rewrite_cookie_domain, rewrite_header_value,
     rewrite_text_body,
@@ -42,6 +42,13 @@ impl ProxyState {
             dns,
         }
     }
+
+    fn error_override(&self) -> Option<StatusCode> {
+        self.config
+            .server
+            .proxy_error_status
+            .and_then(|code| StatusCode::from_u16(code).ok())
+    }
 }
 
 pub async fn proxy_handler(
@@ -58,22 +65,25 @@ pub async fn proxy_handler(
         .match_host(host)
         .ok_or_else(|| AppError::RouteNotFound(host.to_string()))?;
 
-    let incoming_host = host.to_string();
-    let accept_language = request
-        .headers()
-        .get("accept-language")
-        .and_then(|v| v.to_str().ok());
-    let language = AppError::detect_language(accept_language).to_string();
+    let error_ctx = ErrorContext {
+        incoming_host: host.to_string(),
+        language: AppError::detect_language(
+            request
+                .headers()
+                .get("accept-language")
+                .and_then(|v| v.to_str().ok()),
+        )
+        .to_string(),
+        error_status_override: state.error_override(),
+    };
 
     if is_websocket_upgrade(request.headers()) {
         return forward_websocket(state, route, request)
             .await
-            .map_err(|e| e.with_incoming_host(&incoming_host).with_language(&language));
+            .map_err(|e| e.enrich(&error_ctx));
     }
 
-    forward_http(state, route, request)
-        .await
-        .map_err(|e| e.with_incoming_host(&incoming_host).with_language(&language))
+    forward_http(state, route, request, &error_ctx).await
 }
 
 fn upstream_authority(route: &MatchedRoute) -> String {
@@ -88,6 +98,7 @@ async fn forward_http(
     state: Arc<ProxyState>,
     route: MatchedRoute,
     request: Request<Body>,
+    error_ctx: &ErrorContext,
 ) -> Result<Response<Body>, AppError> {
     let path_and_query = request
         .uri()
@@ -107,7 +118,14 @@ async fn forward_http(
         path_and_query
     )
     .parse()
-    .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+    .map_err(|err| {
+        AppError::Upstream(
+            anyhow::Error::new(err),
+            String::new(),
+            String::new(),
+            error_ctx.error_status_override,
+        )
+    })?;
 
     let (mut parts, body) = request.into_parts();
     parts.uri = upstream_uri;
@@ -124,9 +142,6 @@ async fn forward_http(
         parts.headers.insert(USER_AGENT, value);
     }
     if route.body_rewrite == BodyRewriteMode::Enabled {
-        // Request uncompressed content so we can safely rewrite the body.
-        // Removing Accept-Encoding would mean "any encoding is acceptable" per
-        // RFC 7231 §5.3.4, so we explicitly send `identity` instead.
         parts
             .headers
             .insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
@@ -137,13 +152,19 @@ async fn forward_http(
     let connector = UpstreamConnector::new(state.dns.clone());
     let route_for_connect = route.clone();
     let connect_timeout = Duration::from_millis(state.config.server.connect_timeout_ms);
+    let override_status = error_ctx.error_status_override;
     let service = service_fn(move |uri: Uri| {
         let connector = connector.clone();
         let route = route_for_connect.clone();
         let future: Pin<Box<dyn Future<Output = Result<_, AppError>> + Send>> =
             Box::pin(async move {
                 let host = uri.host().ok_or_else(|| {
-                    AppError::Upstream(anyhow::anyhow!("missing upstream host"), String::new(), String::new())
+                    AppError::Upstream(
+                        anyhow::anyhow!("missing upstream host"),
+                        String::new(),
+                        String::new(),
+                        override_status,
+                    )
                 })?;
                 let port = uri.port_u16().unwrap_or(route.upstream_port);
                 let stream = timeout(
@@ -151,7 +172,9 @@ async fn forward_http(
                     connector.connect(route.upstream_proxy.as_deref(), host, port),
                 )
                 .await
-                .map_err(|_| AppError::UpstreamTimeout(String::new(), String::new()))??;
+                .map_err(|_| {
+                    AppError::UpstreamTimeout(String::new(), String::new(), override_status)
+                })??;
                 let stream = timeout(
                     connect_timeout,
                     maybe_tls_stream(
@@ -161,7 +184,9 @@ async fn forward_http(
                     ),
                 )
                 .await
-                .map_err(|_| AppError::UpstreamTimeout(String::new(), String::new()))??;
+                .map_err(|_| {
+                    AppError::UpstreamTimeout(String::new(), String::new(), override_status)
+                })??;
                 Ok(boxed_body_io(stream))
             });
         future
@@ -171,10 +196,23 @@ async fn forward_http(
     let request_timeout = Duration::from_millis(state.config.server.request_timeout_ms);
     let upstream_response = timeout(request_timeout, client.request(upstream_request))
         .await
-        .map_err(|_| AppError::UpstreamTimeout(String::new(), String::new()))?
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(|_| {
+            AppError::UpstreamTimeout(
+                String::new(),
+                String::new(),
+                error_ctx.error_status_override,
+            )
+        })?
+        .map_err(|err| {
+            AppError::Upstream(
+                anyhow::Error::new(err),
+                String::new(),
+                String::new(),
+                error_ctx.error_status_override,
+            )
+        })?;
 
-    rewrite_response(state, route, upstream_response).await
+    rewrite_response(state, route, upstream_response, error_ctx).await
 }
 
 async fn forward_websocket(
@@ -204,7 +242,7 @@ async fn forward_websocket(
     );
     let mut upstream_request = upstream_url
         .into_client_request()
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+        .map_err(AppError::upstream)?;
     let connector = UpstreamConnector::new(state.dns.clone());
     let upstream_proxy = route.upstream_proxy.clone();
     let upstream_host = route.upstream_host.clone();
@@ -233,9 +271,7 @@ async fn forward_websocket(
         .get(SEC_WEBSOCKET_KEY)
         .and_then(|value| value.to_str().ok())
         .map(|value| derive_accept_key(value.as_bytes()))
-        .ok_or_else(|| {
-            AppError::Upstream(anyhow::anyhow!("missing Sec-WebSocket-Key"), String::new(), String::new())
-        })?;
+        .ok_or_else(|| AppError::upstream(anyhow::anyhow!("missing Sec-WebSocket-Key")))?;
     let upgraded = hyper::upgrade::on(request);
     tokio::spawn(async move {
         let Ok(client) = upgraded.await else {
@@ -273,28 +309,25 @@ async fn forward_websocket(
         .header(UPGRADE, "websocket")
         .header(SEC_WEBSOCKET_ACCEPT, accept_key)
         .body(Body::empty())
-        .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))
+        .map_err(AppError::upstream)
 }
 
 async fn rewrite_response(
     state: Arc<ProxyState>,
     route: MatchedRoute,
     response: Response<hyper::body::Incoming>,
+    error_ctx: &ErrorContext,
 ) -> Result<Response<Body>, AppError> {
     let (mut parts, body) = response.into_parts();
 
-    // Intercept upstream error responses (4xx/5xx) and return a custom error
-    // page instead of forwarding the upstream's error to the client.
     if parts.status.is_client_error() || parts.status.is_server_error() {
-        // Drain the body so the upstream connection is cleanly released.
         drop(body);
         return Err(AppError::UpstreamError {
             status: parts.status,
             domain: route.upstream_host.clone(),
-            // incoming_host and language are filled in by with_incoming_host() and
-            // with_language() in proxy_handler
             incoming_host: String::new(),
             language: String::new(),
+            error_status_override: error_ctx.error_status_override,
         });
     }
 
@@ -306,9 +339,8 @@ async fn rewrite_response(
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|s| s.to_ascii_lowercase());
-    let should_rewrite_body =
-        route.body_rewrite == BodyRewriteMode::Enabled
-            && is_rewritable_content_type(content_type.as_deref());
+    let should_rewrite_body = route.body_rewrite == BodyRewriteMode::Enabled
+        && is_rewritable_content_type(content_type.as_deref());
     let content_length = parts
         .headers
         .get(CONTENT_LENGTH)
@@ -327,7 +359,14 @@ async fn rewrite_response(
         state.config.rewrite.max_buffer_bytes,
     )
     .await
-    .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+    .map_err(|err| {
+        AppError::Upstream(
+            anyhow::Error::new(err),
+            String::new(),
+            String::new(),
+            error_ctx.error_status_override,
+        )
+    })?;
 
     let encoding = parts
         .headers
@@ -338,41 +377,50 @@ async fn rewrite_response(
         Some("gzip") => {
             let mut decoder = GzDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+            decoder.read_to_end(&mut decompressed).map_err(|err| {
+                AppError::Upstream(
+                    anyhow::Error::new(err),
+                    String::new(),
+                    String::new(),
+                    error_ctx.error_status_override,
+                )
+            })?;
             parts.headers.remove("content-encoding");
             decompressed
         }
         Some("deflate") => {
             let mut decoder = DeflateDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+            decoder.read_to_end(&mut decompressed).map_err(|err| {
+                AppError::Upstream(
+                    anyhow::Error::new(err),
+                    String::new(),
+                    String::new(),
+                    error_ctx.error_status_override,
+                )
+            })?;
             parts.headers.remove("content-encoding");
             decompressed
         }
         Some("br") => {
             let mut decompressed = Vec::new();
             let mut reader: &[u8] = bytes.as_ref();
-            brotli::BrotliDecompress(&mut reader, &mut decompressed)
-                .map_err(|err| AppError::Upstream(anyhow::Error::new(err), String::new(), String::new()))?;
+            brotli::BrotliDecompress(&mut reader, &mut decompressed).map_err(|err| {
+                AppError::Upstream(
+                    anyhow::Error::new(err),
+                    String::new(),
+                    String::new(),
+                    error_ctx.error_status_override,
+                )
+            })?;
             parts.headers.remove("content-encoding");
             decompressed
         }
         Some(_) => {
-            // Unsupported encoding — pass through unchanged.
-            // Text rewriting would corrupt the compressed binary payload.
             let body = Body::from(bytes.to_vec());
             return Ok(Response::from_parts(parts, body));
         }
-        None => {
-            // Safety net: detect compressed data by magic bytes in case the
-            // upstream ignored our Accept-Encoding: identity and returned
-            // compressed content without a Content-Encoding header.
-            decompress_by_magic(bytes.as_ref())
-        }
+        None => decompress_by_magic(bytes.as_ref()),
     };
 
     let text = String::from_utf8_lossy(&decoded);
@@ -381,7 +429,6 @@ async fn rewrite_response(
         rewritten = rewrite_text_body(&rewritten, from, to);
     }
 
-    // Inject script tags into HTML responses when scripts are configured.
     let is_html = content_type
         .as_deref()
         .map(|ct| ct.contains("text/html"))
@@ -419,10 +466,6 @@ fn rewrite_response_headers(
     rewrite_pairs: &[(String, String)],
 ) {
     if let Some(value) = headers.get(LOCATION).and_then(|value| value.to_str().ok()) {
-        // Apply every known upstream->incoming mapping, not just the matched
-        // route's, so a redirect to a sibling upstream domain (e.g. an
-        // api.bgm.tv response redirecting to lain.bgm.tv) is rewritten to its
-        // mirror domain instead of leaking the upstream host.
         let mut rewritten = value.to_string();
         for (from, to) in rewrite_pairs {
             rewritten = rewrite_header_value(&rewritten, from, to);
@@ -450,10 +493,6 @@ fn rewrite_response_headers(
     }
 }
 
-/// Attempt decompression based on magic bytes when Content-Encoding is absent.
-/// Some CDNs return compressed content without a Content-Encoding header.
-/// Returns the decompressed bytes, or the original bytes if no known signature
-/// is found.
 fn decompress_by_magic(bytes: &[u8]) -> Vec<u8> {
     // gzip magic: 1f 8b
     if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
@@ -471,10 +510,7 @@ fn decompress_by_magic(bytes: &[u8]) -> Vec<u8> {
             return out;
         }
     }
-    // brotli: the first nibble of a brotli stream encodes the WBITS window
-    // size. Valid first bytes are in the range 0x00-0x0F for the meta-block
-    // header, but we avoid false positives by only trying brotli if the data
-    // is NOT valid UTF-8 (compressed binary almost never is).
+    // brotli: try only if the data is not valid UTF-8.
     if !bytes.is_empty() && std::str::from_utf8(bytes).is_err() {
         let mut reader: &[u8] = bytes;
         let mut out = Vec::new();

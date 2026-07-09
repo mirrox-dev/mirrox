@@ -29,9 +29,8 @@ pub async fn static_file_handler(
         return Err(AppError::Config("invalid script filename".into()));
     }
     let path = state.dir.join(&filename);
-    let content = std::fs::read(&path).map_err(|_| {
-        AppError::Config(format!("script file not found: {}", path.display()))
-    })?;
+    let content = std::fs::read(&path)
+        .map_err(|_| AppError::Config(format!("script file not found: {}", path.display())))?;
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "application/javascript; charset=utf-8")
@@ -58,7 +57,10 @@ pub fn build_script_tags(scripts: &[String], prefix: &str) -> String {
         } else {
             format!("{}/{}", prefix.trim_end_matches('/'), script)
         };
-        tags.push_str(&format!("<script src=\"{}\"></script>\n", html_escape(&src)));
+        tags.push_str(&format!(
+            "<script src=\"{}\"></script>\n",
+            html_escape(&src)
+        ));
     }
     tags
 }
