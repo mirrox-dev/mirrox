@@ -91,9 +91,37 @@ Content-Type: text/html; charset=utf-8
 6. Configuration rejects response statuses that cannot carry the HTML page, including informational statuses, 204, 205, and 304.
 7. A Cloudflare/Tunnel failure that occurs before the request reaches Mirrox cannot be rendered by Mirrox and must be handled at the Cloudflare layer.
 
-## 4. Internal structure
+## 4. Error-page frontend design
 
-### 4.1 Routing and rewrite planning
+The error page is a reliable infrastructure surface, not a marketing page. It uses a restrained industrial-editorial visual language and remains fully self-contained.
+
+### 4.1 Layout and hierarchy
+
+- A compact top line identifies `mirrox / gateway status`.
+- Desktop uses an asymmetric two-column composition: an oversized monospace original status code on the left and the localized explanation on the right.
+- The details column presents the error title, concise explanation, affected domain, and a link that retries the current request.
+- A lightweight diagnostic rail shows `CLIENT -> MIRROX -> UPSTREAM` and marks the failed upstream boundary.
+- Mobile collapses to one column without clipping or horizontal scrolling.
+
+### 4.2 Visual system
+
+- Warm neutral background, near-black foreground, and one desaturated failure-red accent.
+- System sans-serif for explanatory copy and the system monospace stack for status and diagnostic data, with no font downloads.
+- Flat editorial surfaces with fine rules and deliberate whitespace; no generic centered card, glassmorphism, gradient mesh, illustration, or decorative icon dependency.
+- Native dark-mode colors through `prefers-color-scheme: dark`.
+- Any nonessential transition is disabled by `prefers-reduced-motion`.
+
+### 4.3 Reliability and accessibility
+
+- Inline semantic HTML and CSS only; no JavaScript, external image, external font, SVG fetch, or other network dependency.
+- Localized Chinese and English documents remain separate and set the correct `lang` attribute.
+- Visible keyboard focus, AA text contrast, responsive type through `clamp()`, and semantic `<main>`/`<section>` structure.
+- The visible status always uses the original upstream/gateway error status, never the optional outward proxy status.
+- Dynamic domain, status, title, and description values are HTML-escaped before interpolation.
+
+## 5. Internal structure
+
+### 5.1 Routing and rewrite planning
 
 `RouteTable` keeps:
 
@@ -103,7 +131,7 @@ Content-Type: text/html; charset=utf-8
 
 A rewrite-plan builder deduplicates each upstream according to the precedence rules and produces immutable rewrite rules. The body and header rewrite paths consume this plan instead of repeatedly applying unrelated `String::replace` calls.
 
-### 4.2 Error model
+### 5.2 Error model
 
 Gateway errors use named fields and a shared `ErrorContext` containing:
 
@@ -113,11 +141,11 @@ Gateway errors use named fields and a shared `ErrorContext` containing:
 
 The renderer computes `original_status` and `response_status` separately. Production response construction must not panic.
 
-### 4.3 Proxy module boundaries
+### 5.3 Proxy module boundaries
 
 The HTTP forwarding path remains in `proxy.rs`, while reusable host rewriting stays in `rewrite.rs`. Helpers will be extracted only where they establish a clear responsibility or remove duplicated error construction. Public behavior unrelated to this design remains compatible.
 
-## 5. Engineering audit scope
+## 6. Engineering audit scope
 
 The repository-wide review includes:
 
@@ -130,7 +158,7 @@ The repository-wide review includes:
 - remove avoidable production `unwrap()` calls on response paths;
 - preserve WebSocket, compression, script injection, upstream proxy, direct mode, and health endpoint behavior.
 
-## 6. Testing strategy
+## 7. Testing strategy
 
 Implementation follows red-green-refactor. Regression coverage includes:
 
@@ -145,13 +173,14 @@ Implementation follows red-green-refactor. Regression coverage includes:
 - Cookie Domain boundary and casing behavior;
 - original versus outward error status;
 - error response headers and body status text;
+- HTML escaping, bilingual document language, responsive CSS hooks, and self-contained error-page assets;
 - 4xx non-override behavior;
 - invalid `proxy_error_status` configuration;
 - duplicate incoming route validation;
 - DNS configuration parsing/building;
 - existing HTTP, WebSocket, compression, script, and upstream-proxy regression suites.
 
-## 7. Documentation and release
+## 8. Documentation and release
 
 Update:
 
@@ -163,7 +192,7 @@ Update:
 
 After formatting, linting, tests, and release build succeed, commit the implementation, update both Cargo manifests to `0.3.0` in a release commit, and create annotated tag `v0.3.0`. The existing `v0.2.9` tag remains unchanged. No remote push is performed automatically.
 
-## 8. Non-goals
+## 9. Non-goals
 
 - Automatically infer `.one` and `.lol` as coherent mirror families.
 - Add a new `rewrite_group` configuration field.
