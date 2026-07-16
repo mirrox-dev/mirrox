@@ -14,21 +14,20 @@ pub enum AppError {
     Dns {
         host: String,
         source: anyhow::Error,
-        incoming_host: String,
-        language: String,
-        proxy_error_status: Option<StatusCode>,
+        context: ErrorContext,
     },
-    #[error("upstream request failed: {0}")]
-    Upstream(anyhow::Error, String, String, Option<StatusCode>),
+    #[error("upstream request failed: {source}")]
+    Upstream {
+        source: anyhow::Error,
+        context: ErrorContext,
+    },
     #[error("upstream timed out")]
-    UpstreamTimeout(String, String, Option<StatusCode>),
+    UpstreamTimeout { context: ErrorContext },
     #[error("upstream returned {status}")]
     UpstreamError {
         status: StatusCode,
         domain: String,
-        incoming_host: String,
-        language: String,
-        proxy_error_status: Option<StatusCode>,
+        context: ErrorContext,
     },
 }
 
@@ -40,41 +39,51 @@ pub struct ErrorContext {
     pub proxy_error_status: Option<StatusCode>,
 }
 
+impl Default for ErrorContext {
+    fn default() -> Self {
+        Self {
+            incoming_host: String::new(),
+            language: "en".to_string(),
+            proxy_error_status: None,
+        }
+    }
+}
+
 impl AppError {
-    /// Create an upstream connection error that can be enriched at the handler boundary.
-    pub fn upstream(source: impl Into<anyhow::Error>) -> Self {
-        AppError::Upstream(source.into(), String::new(), String::new(), None)
+    pub fn dns(host: impl Into<String>, source: impl Into<anyhow::Error>) -> Self {
+        Self::Dns {
+            host: host.into(),
+            source: source.into(),
+            context: ErrorContext::default(),
+        }
     }
 
-    pub fn enrich(self, context: &ErrorContext) -> Self {
-        match self {
-            AppError::Dns { host, source, .. } => AppError::Dns {
-                host,
-                source,
-                incoming_host: context.incoming_host.clone(),
-                language: context.language.clone(),
-                proxy_error_status: context.proxy_error_status,
-            },
-            AppError::Upstream(source, _, _, _) => AppError::Upstream(
-                source,
-                context.incoming_host.clone(),
-                context.language.clone(),
-                context.proxy_error_status,
-            ),
-            AppError::UpstreamTimeout(_, _, _) => AppError::UpstreamTimeout(
-                context.incoming_host.clone(),
-                context.language.clone(),
-                context.proxy_error_status,
-            ),
-            AppError::UpstreamError { status, domain, .. } => AppError::UpstreamError {
-                status,
-                domain,
-                incoming_host: context.incoming_host.clone(),
-                language: context.language.clone(),
-                proxy_error_status: context.proxy_error_status,
-            },
-            other => other,
+    pub fn upstream(source: impl Into<anyhow::Error>) -> Self {
+        Self::Upstream {
+            source: source.into(),
+            context: ErrorContext::default(),
         }
+    }
+
+    pub fn upstream_timeout() -> Self {
+        Self::UpstreamTimeout {
+            context: ErrorContext::default(),
+        }
+    }
+
+    pub fn upstream_response(status: StatusCode, domain: impl Into<String>) -> Self {
+        Self::UpstreamError {
+            status,
+            domain: domain.into(),
+            context: ErrorContext::default(),
+        }
+    }
+
+    pub fn enrich(mut self, context: &ErrorContext) -> Self {
+        if let Some(error_context) = self.context_mut() {
+            error_context.clone_from(context);
+        }
+        self
     }
 
     /// Returns `zh` when the accepted languages contain Chinese, otherwise `en`.
@@ -85,13 +94,32 @@ impl AppError {
         }
     }
 
+    fn context_mut(&mut self) -> Option<&mut ErrorContext> {
+        match self {
+            AppError::Dns { context, .. }
+            | AppError::Upstream { context, .. }
+            | AppError::UpstreamTimeout { context }
+            | AppError::UpstreamError { context, .. } => Some(context),
+            AppError::Config(_) | AppError::RouteNotFound(_) => None,
+        }
+    }
+
+    fn context(&self) -> Option<&ErrorContext> {
+        match self {
+            AppError::Dns { context, .. }
+            | AppError::Upstream { context, .. }
+            | AppError::UpstreamTimeout { context }
+            | AppError::UpstreamError { context, .. } => Some(context),
+            AppError::Config(_) | AppError::RouteNotFound(_) => None,
+        }
+    }
+
     fn original_status(&self) -> StatusCode {
         match self {
             AppError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::RouteNotFound(_) => StatusCode::MISDIRECTED_REQUEST,
-            AppError::Dns { .. } => StatusCode::BAD_GATEWAY,
-            AppError::Upstream(..) => StatusCode::BAD_GATEWAY,
-            AppError::UpstreamTimeout(..) => StatusCode::GATEWAY_TIMEOUT,
+            AppError::Dns { .. } | AppError::Upstream { .. } => StatusCode::BAD_GATEWAY,
+            AppError::UpstreamTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
             AppError::UpstreamError { status, .. } => *status,
         }
     }
@@ -99,51 +127,39 @@ impl AppError {
     /// Only custom 5xx responses may use the CDN tunneling status.
     fn response_status(&self, original: StatusCode) -> StatusCode {
         if original.is_server_error() {
-            self.proxy_error_status().unwrap_or(original)
+            self.context()
+                .and_then(|context| context.proxy_error_status)
+                .unwrap_or(original)
         } else {
             original
         }
     }
 
-    fn proxy_error_status(&self) -> Option<StatusCode> {
-        match self {
-            AppError::Dns {
-                proxy_error_status, ..
-            } => *proxy_error_status,
-            AppError::Upstream(_, _, _, status) => *status,
-            AppError::UpstreamTimeout(_, _, status) => *status,
-            AppError::UpstreamError {
-                proxy_error_status, ..
-            } => *proxy_error_status,
-            _ => None,
-        }
-    }
-
     fn gateway_error_fields(&self) -> Option<GatewayErrorFields> {
         match self {
-            AppError::Dns { host, language, .. } => Some(GatewayErrorFields {
+            AppError::Dns { host, context, .. } => Some(GatewayErrorFields {
                 failure_kind: FailureKind::Dns,
-                language: Language::from_code(language),
+                language: Language::from_code(&context.language),
                 domain: host.clone(),
             }),
-            AppError::Upstream(_, incoming_host, language, _) => Some(GatewayErrorFields {
+            AppError::Upstream { context, .. } => Some(GatewayErrorFields {
                 failure_kind: FailureKind::Connection,
-                language: Language::from_code(language),
-                domain: incoming_host.clone(),
+                language: Language::from_code(&context.language),
+                domain: context.incoming_host.clone(),
             }),
-            AppError::UpstreamTimeout(incoming_host, language, _) => Some(GatewayErrorFields {
+            AppError::UpstreamTimeout { context } => Some(GatewayErrorFields {
                 failure_kind: FailureKind::Timeout,
-                language: Language::from_code(language),
-                domain: incoming_host.clone(),
+                language: Language::from_code(&context.language),
+                domain: context.incoming_host.clone(),
             }),
             AppError::UpstreamError {
-                domain, language, ..
+                domain, context, ..
             } => Some(GatewayErrorFields {
                 failure_kind: FailureKind::Upstream,
-                language: Language::from_code(language),
+                language: Language::from_code(&context.language),
                 domain: domain.clone(),
             }),
-            _ => None,
+            AppError::Config(_) | AppError::RouteNotFound(_) => None,
         }
     }
 }

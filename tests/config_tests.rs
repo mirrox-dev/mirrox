@@ -276,3 +276,59 @@ fn rejects_proxy_error_status_without_a_response_body() {
         );
     }
 }
+
+#[test]
+fn rejects_duplicate_incoming_routes_after_normalization() {
+    let error = AppConfig::from_toml_str(
+        r#"
+        [[routes]]
+        incoming = "API.EXAMPLE.COM."
+        upstream = "api.bgm.tv"
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api2.bgm.tv"
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate route"));
+    assert!(error.to_string().contains("api.example.com"));
+}
+
+#[test]
+fn rejects_duplicate_wildcard_suffixes_after_normalization() {
+    let error = AppConfig::from_toml_str(
+        r#"
+        [[wildcard_routes]]
+        incoming_suffix = "EXAMPLE.COM."
+        upstream_suffix = "bgm.tv"
+
+        [[wildcard_routes]]
+        incoming_suffix = ".example.com"
+        upstream_suffix = ".other.tv"
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate wildcard route"));
+    assert!(error.to_string().contains(".example.com"));
+}
+
+#[test]
+fn allows_shared_upstream_routes() {
+    let config = AppConfig::from_toml_str(
+        r#"
+        [[routes]]
+        incoming = "api.bangumi.one"
+        upstream = "api.bgm.tv"
+
+        [[routes]]
+        incoming = "api.bangumi.lol"
+        upstream = "api.bgm.tv"
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(config.routes.len(), 2);
+}

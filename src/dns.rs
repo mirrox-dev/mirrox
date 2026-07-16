@@ -58,6 +58,7 @@ pub struct HickoryDnsResolver {
     resolver: TokioAsyncResolver,
 }
 
+#[derive(Debug)]
 struct ParsedServer {
     socket_addr: SocketAddr,
     protocol: Protocol,
@@ -65,6 +66,9 @@ struct ParsedServer {
 }
 
 fn resolve_host_port(host: &str, port: u16) -> Result<SocketAddr> {
+    if let Ok(ip) = host.parse() {
+        return Ok(SocketAddr::new(ip, port));
+    }
     (host, port)
         .to_socket_addrs()
         .map_err(|err| AppError::Config(format!("failed to resolve DNS server {host}: {err}")))?
@@ -73,49 +77,70 @@ fn resolve_host_port(host: &str, port: u16) -> Result<SocketAddr> {
 }
 
 fn parse_server(value: &str, mode: &DnsMode) -> Result<ParsedServer> {
-    // URL format: https://cloudflare-dns.com/dns-query, tls://dns.google
     if let Ok(url) = url::Url::parse(value) {
+        let expected_scheme = match mode {
+            DnsMode::Doh => "https",
+            DnsMode::Dot => "tls",
+            DnsMode::Udp => "udp",
+            DnsMode::Tcp => "tcp",
+        };
+        if url.scheme() != expected_scheme {
+            return Err(AppError::Config(format!(
+                "DNS mode {mode:?} requires {expected_scheme}:// servers, got {value}"
+            )));
+        }
+        if matches!(mode, DnsMode::Doh) && url.path() != "/dns-query" {
+            return Err(AppError::Config(format!(
+                "DNS-over-HTTPS server must use the /dns-query endpoint: {value}"
+            )));
+        }
         let host = url
             .host_str()
             .ok_or_else(|| AppError::Config(format!("missing host in DNS server URL: {value}")))?;
-        let port = url.port_or_known_default().unwrap_or(match mode {
+        let port = url.port().unwrap_or(match mode {
             DnsMode::Dot => 853,
             DnsMode::Doh => 443,
-            _ => 53,
+            DnsMode::Udp | DnsMode::Tcp => 53,
         });
-        let socket_addr = resolve_host_port(host, port)?;
-        let protocol = match mode {
-            DnsMode::Doh => Protocol::Https,
-            DnsMode::Dot => Protocol::Tls,
-            DnsMode::Udp => Protocol::Udp,
-            DnsMode::Tcp => Protocol::Tcp,
-        };
-        let tls_dns_name = match mode {
-            DnsMode::Doh | DnsMode::Dot => Some(host.to_string()),
-            _ => None,
-        };
+        let protocol = protocol_for_mode(mode);
         return Ok(ParsedServer {
-            socket_addr,
+            socket_addr: resolve_host_port(host, port)?,
             protocol,
-            tls_dns_name,
+            tls_dns_name: encrypted_dns_name(mode, host),
         });
     }
 
-    // IP:port format
     let socket_addr: SocketAddr = value
         .parse()
         .map_err(|err| AppError::Config(format!("invalid DNS server {value}: {err}")))?;
-    let protocol = match mode {
+    Ok(ParsedServer {
+        socket_addr,
+        protocol: protocol_for_mode(mode),
+        tls_dns_name: encrypted_dns_name(mode, &socket_addr.ip().to_string()),
+    })
+}
+
+fn protocol_for_mode(mode: &DnsMode) -> Protocol {
+    match mode {
         DnsMode::Udp => Protocol::Udp,
         DnsMode::Tcp => Protocol::Tcp,
         DnsMode::Dot => Protocol::Tls,
         DnsMode::Doh => Protocol::Https,
-    };
-    Ok(ParsedServer {
-        socket_addr,
-        protocol,
-        tls_dns_name: None,
-    })
+    }
+}
+
+fn encrypted_dns_name(mode: &DnsMode, host: &str) -> Option<String> {
+    matches!(mode, DnsMode::Doh | DnsMode::Dot).then(|| host.to_string())
+}
+
+fn resolver_options(config: &DnsConfig) -> ResolverOpts {
+    let mut options = ResolverOpts::default();
+    options.timeout = Duration::from_millis(config.timeout_ms);
+    options.positive_min_ttl = Some(Duration::from_secs(config.cache_min_ttl_seconds));
+    options.positive_max_ttl = Some(Duration::from_secs(config.cache_max_ttl_seconds));
+    options.negative_min_ttl = Some(Duration::from_secs(config.cache_min_ttl_seconds));
+    options.negative_max_ttl = Some(Duration::from_secs(config.cache_max_ttl_seconds));
+    options
 }
 
 fn build_hickory_resolver(config: &DnsConfig) -> Result<TokioAsyncResolver> {
@@ -130,14 +155,7 @@ fn build_hickory_resolver(config: &DnsConfig) -> Result<TokioAsyncResolver> {
     }
 
     let resolver_config = ResolverConfig::from_parts(None, vec![], group);
-    let mut resolver_opts = ResolverOpts::default();
-    resolver_opts.timeout = Duration::from_millis(config.timeout_ms);
-    resolver_opts.positive_min_ttl = Some(Duration::from_secs(config.cache_min_ttl_seconds));
-    resolver_opts.positive_max_ttl = Some(Duration::from_secs(config.cache_max_ttl_seconds));
-    resolver_opts.negative_min_ttl = Some(Duration::from_secs(config.cache_min_ttl_seconds));
-    resolver_opts.negative_max_ttl = Some(Duration::from_secs(config.cache_max_ttl_seconds));
-
-    let resolver = TokioAsyncResolver::tokio(resolver_config, resolver_opts);
+    let resolver = TokioAsyncResolver::tokio(resolver_config, resolver_options(config));
     Ok(resolver)
 }
 
@@ -148,22 +166,13 @@ impl DnsResolver for HickoryDnsResolver {
             .resolver
             .lookup_ip(host)
             .await
-            .map_err(|source| AppError::Dns {
-                host: host.to_string(),
-                source: anyhow::Error::new(source),
-                incoming_host: String::new(),
-                language: String::new(),
-                proxy_error_status: None,
-            })?;
+            .map_err(|source| AppError::dns(host, anyhow::Error::new(source)))?;
         let addresses: Vec<_> = lookups.iter().map(|ip| SocketAddr::new(ip, port)).collect();
         if addresses.is_empty() {
-            return Err(AppError::Dns {
-                host: host.to_string(),
-                source: anyhow::anyhow!("no addresses returned for {host}"),
-                incoming_host: String::new(),
-                language: String::new(),
-                proxy_error_status: None,
-            });
+            return Err(AppError::dns(
+                host,
+                anyhow::anyhow!("no addresses returned for {host}"),
+            ));
         }
         Ok(addresses)
     }
@@ -203,5 +212,37 @@ mod tests {
         };
         let factory = ResolverFactory::new(config).unwrap();
         assert!(factory.build().is_ok());
+    }
+
+    #[test]
+    fn parses_doh_server_with_expected_protocol_and_tls_name() {
+        let parsed = parse_server("https://127.0.0.1/dns-query", &DnsMode::Doh).unwrap();
+
+        assert_eq!(parsed.socket_addr, "127.0.0.1:443".parse().unwrap());
+        assert_eq!(parsed.protocol, Protocol::Https);
+        assert_eq!(parsed.tls_dns_name.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn rejects_dns_url_scheme_that_does_not_match_mode() {
+        let error = parse_server("tls://127.0.0.1", &DnsMode::Doh).unwrap_err();
+        assert!(error.to_string().contains("requires https://"));
+    }
+
+    #[test]
+    fn configured_timeout_and_ttls_populate_resolver_options() {
+        let config = DnsConfig {
+            timeout_ms: 1750,
+            cache_min_ttl_seconds: 45,
+            cache_max_ttl_seconds: 420,
+            ..Default::default()
+        };
+
+        let options = resolver_options(&config);
+        assert_eq!(options.timeout, Duration::from_millis(1750));
+        assert_eq!(options.positive_min_ttl, Some(Duration::from_secs(45)));
+        assert_eq!(options.positive_max_ttl, Some(Duration::from_secs(420)));
+        assert_eq!(options.negative_min_ttl, Some(Duration::from_secs(45)));
+        assert_eq!(options.negative_max_ttl, Some(Duration::from_secs(420)));
     }
 }

@@ -83,7 +83,9 @@ pub async fn proxy_handler(
             .map_err(|e| e.enrich(&error_ctx));
     }
 
-    forward_http(state, route, request, &error_ctx).await
+    forward_http(state, route, request)
+        .await
+        .map_err(|error| error.enrich(&error_ctx))
 }
 
 fn upstream_authority(route: &MatchedRoute) -> String {
@@ -98,7 +100,6 @@ async fn forward_http(
     state: Arc<ProxyState>,
     route: MatchedRoute,
     request: Request<Body>,
-    error_ctx: &ErrorContext,
 ) -> Result<Response<Body>, AppError> {
     let path_and_query = request
         .uri()
@@ -118,14 +119,7 @@ async fn forward_http(
         path_and_query
     )
     .parse()
-    .map_err(|err| {
-        AppError::Upstream(
-            anyhow::Error::new(err),
-            String::new(),
-            String::new(),
-            error_ctx.proxy_error_status,
-        )
-    })?;
+    .map_err(AppError::upstream)?;
 
     let (mut parts, body) = request.into_parts();
     parts.uri = upstream_uri;
@@ -152,29 +146,21 @@ async fn forward_http(
     let connector = UpstreamConnector::new(state.dns.clone());
     let route_for_connect = route.clone();
     let connect_timeout = Duration::from_millis(state.config.server.connect_timeout_ms);
-    let override_status = error_ctx.proxy_error_status;
     let service = service_fn(move |uri: Uri| {
         let connector = connector.clone();
         let route = route_for_connect.clone();
         let future: Pin<Box<dyn Future<Output = Result<_, AppError>> + Send>> =
             Box::pin(async move {
-                let host = uri.host().ok_or_else(|| {
-                    AppError::Upstream(
-                        anyhow::anyhow!("missing upstream host"),
-                        String::new(),
-                        String::new(),
-                        override_status,
-                    )
-                })?;
+                let host = uri
+                    .host()
+                    .ok_or_else(|| AppError::upstream(anyhow::anyhow!("missing upstream host")))?;
                 let port = uri.port_u16().unwrap_or(route.upstream_port);
                 let stream = timeout(
                     connect_timeout,
                     connector.connect(route.upstream_proxy.as_deref(), host, port),
                 )
                 .await
-                .map_err(|_| {
-                    AppError::UpstreamTimeout(String::new(), String::new(), override_status)
-                })??;
+                .map_err(|_| AppError::upstream_timeout())??;
                 let stream = timeout(
                     connect_timeout,
                     maybe_tls_stream(
@@ -184,9 +170,7 @@ async fn forward_http(
                     ),
                 )
                 .await
-                .map_err(|_| {
-                    AppError::UpstreamTimeout(String::new(), String::new(), override_status)
-                })??;
+                .map_err(|_| AppError::upstream_timeout())??;
                 Ok(boxed_body_io(stream))
             });
         future
@@ -196,19 +180,10 @@ async fn forward_http(
     let request_timeout = Duration::from_millis(state.config.server.request_timeout_ms);
     let upstream_response = timeout(request_timeout, client.request(upstream_request))
         .await
-        .map_err(|_| {
-            AppError::UpstreamTimeout(String::new(), String::new(), error_ctx.proxy_error_status)
-        })?
-        .map_err(|err| {
-            AppError::Upstream(
-                anyhow::Error::new(err),
-                String::new(),
-                String::new(),
-                error_ctx.proxy_error_status,
-            )
-        })?;
+        .map_err(|_| AppError::upstream_timeout())?
+        .map_err(AppError::upstream)?;
 
-    rewrite_response(state, route, upstream_response, error_ctx).await
+    rewrite_response(state, route, upstream_response).await
 }
 
 async fn forward_websocket(
@@ -312,19 +287,15 @@ async fn rewrite_response(
     state: Arc<ProxyState>,
     route: MatchedRoute,
     response: Response<hyper::body::Incoming>,
-    error_ctx: &ErrorContext,
 ) -> Result<Response<Body>, AppError> {
     let (mut parts, body) = response.into_parts();
 
     if parts.status.is_client_error() || parts.status.is_server_error() {
         drop(body);
-        return Err(AppError::UpstreamError {
-            status: parts.status,
-            domain: route.upstream_host.clone(),
-            incoming_host: String::new(),
-            language: String::new(),
-            proxy_error_status: error_ctx.proxy_error_status,
-        });
+        return Err(AppError::upstream_response(
+            parts.status,
+            route.upstream_host.clone(),
+        ));
     }
 
     let rewrite_plan = state.routes.rewrite_plan_for(&route);
@@ -355,14 +326,7 @@ async fn rewrite_response(
         state.config.rewrite.max_buffer_bytes,
     )
     .await
-    .map_err(|err| {
-        AppError::Upstream(
-            anyhow::Error::new(err),
-            String::new(),
-            String::new(),
-            error_ctx.proxy_error_status,
-        )
-    })?;
+    .map_err(AppError::upstream)?;
 
     let encoding = parts
         .headers
@@ -373,42 +337,25 @@ async fn rewrite_response(
         Some("gzip") => {
             let mut decoder = GzDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed).map_err(|err| {
-                AppError::Upstream(
-                    anyhow::Error::new(err),
-                    String::new(),
-                    String::new(),
-                    error_ctx.proxy_error_status,
-                )
-            })?;
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(AppError::upstream)?;
             parts.headers.remove("content-encoding");
             decompressed
         }
         Some("deflate") => {
             let mut decoder = DeflateDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed).map_err(|err| {
-                AppError::Upstream(
-                    anyhow::Error::new(err),
-                    String::new(),
-                    String::new(),
-                    error_ctx.proxy_error_status,
-                )
-            })?;
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(AppError::upstream)?;
             parts.headers.remove("content-encoding");
             decompressed
         }
         Some("br") => {
             let mut decompressed = Vec::new();
             let mut reader: &[u8] = bytes.as_ref();
-            brotli::BrotliDecompress(&mut reader, &mut decompressed).map_err(|err| {
-                AppError::Upstream(
-                    anyhow::Error::new(err),
-                    String::new(),
-                    String::new(),
-                    error_ctx.proxy_error_status,
-                )
-            })?;
+            brotli::BrotliDecompress(&mut reader, &mut decompressed).map_err(AppError::upstream)?;
             parts.headers.remove("content-encoding");
             decompressed
         }

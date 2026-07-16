@@ -37,3 +37,20 @@ async fn readyz_returns_ready() {
     response.assert_status_ok();
     response.assert_text("ready");
 }
+
+#[tokio::test]
+async fn responses_propagate_a_generated_request_id() {
+    let app = build_router(config()).await.unwrap();
+    let server = TestServer::new(app).unwrap();
+
+    let response = server.get("/healthz").await;
+
+    response.assert_status_ok();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("response should expose its request id")
+        .to_str()
+        .unwrap();
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+}

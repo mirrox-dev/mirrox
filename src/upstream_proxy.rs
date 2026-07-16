@@ -97,9 +97,26 @@ impl UpstreamConnector {
 
     async fn connect_direct(&self, host: &str, port: u16) -> Result<TcpStream, AppError> {
         let addresses = self.dns.resolve(host, port).await?;
-        TcpStream::connect(addresses[0])
-            .await
-            .map_err(AppError::upstream)
+        if addresses.is_empty() {
+            return Err(AppError::upstream(anyhow::anyhow!(
+                "DNS resolver returned no addresses for {host}:{port}"
+            )));
+        }
+
+        let mut last_error = None;
+        for address in addresses {
+            match TcpStream::connect(address).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last_error = Some(error),
+            }
+        }
+
+        Err(AppError::upstream(anyhow::anyhow!(
+            "failed to connect to any resolved address for {host}:{port}: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unknown connection error".to_string())
+        )))
     }
 }
 

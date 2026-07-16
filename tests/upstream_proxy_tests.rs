@@ -142,3 +142,34 @@ async fn connects_through_socks5_proxy_with_auth() {
 
     assert_eq!(&buffer, b"socks-ok");
 }
+
+#[tokio::test]
+async fn direct_connection_tries_all_resolved_addresses() {
+    let unavailable = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unavailable_addr = unavailable.local_addr().unwrap();
+    drop(unavailable);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let available_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        socket.write_all(b"ok").await.unwrap();
+    });
+
+    let resolver = Arc::new(StaticResolver::new(vec![unavailable_addr, available_addr]));
+    let connector = UpstreamConnector::new(resolver);
+    let mut stream = connector.connect(None, "api.bgm.tv", 443).await.unwrap();
+    let mut buffer = [0_u8; 2];
+    stream.read_exact(&mut buffer).await.unwrap();
+
+    assert_eq!(&buffer, b"ok");
+}
+
+#[tokio::test]
+async fn direct_connection_returns_error_for_an_empty_dns_result() {
+    let connector = UpstreamConnector::new(Arc::new(StaticResolver::new(Vec::new())));
+
+    let result = connector.connect(None, "api.bgm.tv", 443).await;
+
+    assert!(result.is_err());
+}

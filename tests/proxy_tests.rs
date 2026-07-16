@@ -1009,3 +1009,19 @@ async fn proxy_error_status_does_not_override_upstream_4xx() {
     response.assert_status(axum::http::StatusCode::NOT_FOUND);
     response.assert_text_contains("404");
 }
+
+#[tokio::test]
+async fn upstream_error_page_respects_accept_language() {
+    let upstream = Router::new().route("/*path", any(bad_gateway_upstream));
+    let server = proxy_for_error_status(upstream, 502).await;
+
+    let response = server
+        .get("/failure")
+        .add_header("host", "api.example.com")
+        .add_header("accept-language", "zh-CN,zh;q=0.9")
+        .await;
+
+    response.assert_status(axum::http::StatusCode::BAD_GATEWAY);
+    response.assert_text_contains("上游服务返回错误");
+    response.assert_text_contains("api.bgm.tv");
+}

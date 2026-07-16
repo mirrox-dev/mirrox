@@ -6,10 +6,11 @@ use crate::routing::RouteTable;
 use crate::scripts::{static_file_handler, ScriptServerState};
 use axum::routing::get;
 use axum::Router;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
-use tower_http::request_id::{MakeRequestUuid, SetRequestIdLayer};
+use tower::ServiceBuilder;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 pub async fn build_router(config: AppConfig) -> Result<Router, AppError> {
@@ -42,15 +43,17 @@ pub async fn build_router_with_state(state: Arc<ProxyState>) -> Result<Router, A
         );
     }
 
-    Ok(router
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(tower_http::trace::DefaultMakeSpan::new().include_headers(true)),
-        )
+    let request_id_header = http::HeaderName::from_static("x-request-id");
+    let middleware = ServiceBuilder::new()
         .layer(SetRequestIdLayer::new(
-            http::HeaderName::from_static("x-request-id"),
+            request_id_header.clone(),
             MakeRequestUuid,
         ))
+        .layer(TraceLayer::new_for_http())
+        .layer(PropagateRequestIdLayer::new(request_id_header));
+
+    Ok(router
+        .layer(middleware)
         .fallback(proxy_handler)
         .with_state(state))
 }
@@ -71,31 +74,56 @@ pub async fn run(config: AppConfig) -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to listen for SIGINT");
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
-    tokio::select! {
-        _ = ctrl_c => {
-            tracing::info!("received SIGINT, starting graceful shutdown");
-        },
-        _ = terminate => {
-            tracing::info!("received SIGTERM, starting graceful shutdown");
-        },
-    }
+    wait_for_shutdown(ctrl_c, terminate).await;
+}
 
-    // Give in-flight requests time to drain.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+async fn wait_for_shutdown<C, T>(ctrl_c: C, terminate: T)
+where
+    C: Future<Output = ()>,
+    T: Future<Output = ()>,
+{
+    let signal = tokio::select! {
+        _ = ctrl_c => "SIGINT",
+        _ = terminate => "SIGTERM",
+    };
+    tracing::info!(signal, "starting graceful shutdown");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_shutdown;
+    use std::future::{pending, ready};
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn shutdown_trigger_completes_without_an_artificial_delay() {
+        timeout(
+            Duration::from_millis(50),
+            wait_for_shutdown(ready(()), pending()),
+        )
+        .await
+        .expect("shutdown should begin as soon as a signal future resolves");
+    }
 }
