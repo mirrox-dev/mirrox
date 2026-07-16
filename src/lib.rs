@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod dns;
 pub mod error;
+mod error_page;
 pub mod proxy;
 pub mod rewrite;
 pub mod routing;
