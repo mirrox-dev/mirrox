@@ -1,6 +1,6 @@
 [package]
 name = "mirrox"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -22,7 +22,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3"
-hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls", "dns-over-rustls", "tokio-runtime"] }
+hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls", "dns-over-rustls", "tokio-runtime", "webpki-roots"] }
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
