@@ -829,3 +829,111 @@ async fn omitted_user_agent_preserves_client_header() {
         "api.bgm.tv/preserve-ua|ua=Client-UA/9.9"
     );
 }
+
+async fn shared_upstream_rewrite_fixture() -> impl IntoResponse {
+    (
+        [("location", "https://api.bgm.tv/v0")],
+        Html(
+            r#"<a href="https://api.bgm.tv/v0">api</a><a href="https://foo.bgm.tv/path">fallback</a><span>fxbgm.tv</span>"#,
+        ),
+    )
+}
+
+#[tokio::test]
+async fn shared_upstream_rewrite_is_current_route_aware_and_boundary_safe() {
+    let app = Router::new().route("/*path", any(shared_upstream_rewrite_fixture));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "api.bangumi.one"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+
+        [[routes]]
+        incoming = "bangumi.one"
+        upstream = "bgm.tv"
+        upstream_scheme = "http"
+
+        [[routes]]
+        incoming = "api.bangumi.lol"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+
+        [[routes]]
+        incoming = "bangumi.lol"
+        upstream = "bgm.tv"
+        upstream_scheme = "http"
+        "#,
+    )
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+    let server = axum_test::TestServer::new(app).unwrap();
+
+    let response = server
+        .get("/rewrite")
+        .add_header("host", "api.bangumi.lol")
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(response.headers()["location"], "https://api.bangumi.lol/v0");
+    response.assert_text_contains("https://api.bangumi.lol/v0");
+    response.assert_text_contains("https://foo.bangumi.lol/path");
+    response.assert_text_contains("fxbgm.tv");
+}
+
+async fn non_cascading_rewrite_fixture() -> impl IntoResponse {
+    Html(r#"<a href="https://a.example/path">link</a>"#)
+}
+
+#[tokio::test]
+async fn response_rewrite_plan_does_not_cascade_between_routes() {
+    let app = Router::new().route("/*path", any(non_cascading_rewrite_fixture));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "b.example"
+        upstream = "a.example"
+        upstream_scheme = "http"
+
+        [[routes]]
+        incoming = "c.example"
+        upstream = "b.example"
+        upstream_scheme = "http"
+        "#,
+    )
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+    let server = axum_test::TestServer::new(app).unwrap();
+
+    let response = server.get("/rewrite").add_header("host", "b.example").await;
+
+    response.assert_status_ok();
+    response.assert_text_contains("https://b.example/path");
+    assert!(!response.text().contains("https://c.example/path"));
+}

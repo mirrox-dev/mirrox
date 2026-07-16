@@ -3,7 +3,7 @@ use crate::dns::SharedDnsResolver;
 use crate::error::{AppError, ErrorContext};
 use crate::rewrite::{
     is_rewritable_content_type, registrable_suffix, rewrite_cookie_domain, rewrite_header_value,
-    rewrite_text_body,
+    RewritePlan,
 };
 use crate::routing::{MatchedRoute, RouteTable};
 use crate::scripts::inject_scripts;
@@ -331,8 +331,8 @@ async fn rewrite_response(
         });
     }
 
-    let rewrite_pairs = state.routes.rewrite_pairs_for(&route);
-    rewrite_response_headers(&mut parts.headers, &route, &rewrite_pairs);
+    let rewrite_plan = state.routes.rewrite_plan_for(&route);
+    rewrite_response_headers(&mut parts.headers, &route, &rewrite_plan);
 
     let content_type: Option<String> = parts
         .headers
@@ -424,10 +424,7 @@ async fn rewrite_response(
     };
 
     let text = String::from_utf8_lossy(&decoded);
-    let mut rewritten = text.to_string();
-    for (from, to) in &rewrite_pairs {
-        rewritten = rewrite_text_body(&rewritten, from, to);
-    }
+    let mut rewritten = rewrite_plan.rewrite(&text).into_owned();
 
     let is_html = content_type
         .as_deref()
@@ -463,13 +460,10 @@ fn rewrite_request_headers(headers: &mut HeaderMap, route: &MatchedRoute) {
 fn rewrite_response_headers(
     headers: &mut HeaderMap,
     route: &MatchedRoute,
-    rewrite_pairs: &[(String, String)],
+    rewrite_plan: &RewritePlan,
 ) {
     if let Some(value) = headers.get(LOCATION).and_then(|value| value.to_str().ok()) {
-        let mut rewritten = value.to_string();
-        for (from, to) in rewrite_pairs {
-            rewritten = rewrite_header_value(&rewritten, from, to);
-        }
+        let rewritten = rewrite_plan.rewrite(value);
         if let Ok(value) = HeaderValue::from_str(&rewritten) {
             headers.insert(LOCATION, value);
         }
