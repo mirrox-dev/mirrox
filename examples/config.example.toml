@@ -6,6 +6,9 @@ http_listen = "0.0.0.0:80"
 https_listen = "0.0.0.0:443"
 # tls_cert = "/etc/letsencrypt/live/proxy.example.com/fullchain.pem"
 # tls_key = "/etc/letsencrypt/live/proxy.example.com/privkey.pem"
+# If a fronting CDN replaces Mirrox-generated 5xx bodies, tunnel the custom page as 200.
+# The original status remains visible and is sent in X-Mirrox-Error-Status.
+# proxy_error_status = 200
 
 [dns]
 mode = "doh"
@@ -22,6 +25,7 @@ default = "direct"
 [rewrite]
 body = "enabled"
 max_buffer_bytes = 2097152
+# Root mappings act as suffix fallbacks for foo.bgm.tv, while fxbgm.tv is left unchanged.
 
 # [scripts]
 # dir = "./scripts"                   # Local directory containing JS files.

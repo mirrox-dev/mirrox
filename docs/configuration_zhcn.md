@@ -25,10 +25,15 @@ http_listen = "0.0.0.0:80"
 https_listen = "0.0.0.0:443"
 tls_cert = "/path/to/fullchain.pem"
 tls_key = "/path/to/privkey.pem"
+connect_timeout_ms = 10000
+request_timeout_ms = 60000
+# proxy_error_status = 200
 ```
 
 - `listen`：当前 HTTP 服务监听的地址。
 - `mode`：可选 `behind-proxy` 或 `direct`。当前实现会绑定 `listen`；`http_listen`、`https_listen`、`tls_cert`、`tls_key` 为直接绑定公网端口的部署模式预留。
+- `connect_timeout_ms` 与 `request_timeout_ms`：分别限制上游连接建立和完整上游请求时间。
+- `proxy_error_status`：仅覆盖 Mirrox 自定义 5xx 页面对外发送的状态。当前置 CDN 会替换 5xx 正文时可设置为 `200`；页面和 `X-Mirrox-Error-Status` 仍保留原始错误。1xx、204、205、304 和超出范围的值会被拒绝。
 
 ## DNS 设置
 
@@ -41,7 +46,7 @@ cache_max_ttl_seconds = 300
 timeout_ms = 2000
 ```
 
-`mode` 支持的配置值包括 `udp`、`tcp`、`dot` 和 `doh`。当前代码已经有 resolver 抽象，但实际解析仍通过 Tokio 系统 DNS；如果要在生产中严格使用自定义 DoH/DoT 服务器，还需要补齐并强化这一部分实现。
+`mode` 支持 `udp`、`tcp`、`dot` 和 `doh`。Mirrox 会按所选协议、服务器、超时和正负缓存 TTL 范围构建 Hickory resolver。URL scheme 必须与模式匹配（DoH 使用 `https://`，DoT 使用 `tls://`），DoH endpoint 使用 `/dns-query`。配置的 DNS 服务器 hostname 会通过宿主机 resolver 做引导解析。
 
 ## 上游代理设置
 
@@ -79,6 +84,8 @@ max_buffer_bytes = 2097152
 - `max_buffer_bytes`：响应体重写时允许缓冲的最大文本响应大小。超过该大小的响应会直接流式透传，不做正文重写。
 
 SSE（`text/event-stream`）和非文本资源会直接流式透传，不做正文重写。
+
+重写目标选择完全确定：当前路由对自身 upstream 优先；其他共享 upstream 的映射选择标准化后字典序最小的 incoming；更长的 upstream 域名优先于短后缀规则。配置 `bgm.tv -> bangumi.lol` 根域映射后，它会为 `foo.bgm.tv` 提供托底；域名标签边界保证 `fxbgm.tv`、`evil-bgm.tv` 和 `bgm.tv.cn` 不会被修改。替换器只扫描原始输入一次，替换结果不会再次触发其他规则。
 
 ## 脚本注入
 
@@ -146,6 +153,8 @@ upstream_port = 443
 ## Cloudflare Tunnel 部署
 
 在 `behind-proxy` 模式下，Mirrox 适合部署在另一个 HTTPS 终止层后方。使用 Cloudflare Tunnel 时，可以把多个公网 hostname 或一个通配 hostname 指向同一个内部服务，例如 `http://mirrox:3000`。Cloudflare 负责公网 HTTPS 证书和终止，并在私有网络内用 HTTP 转发给 Mirrox。Mirrox 随后读取转发过来的 `Host` 头，匹配精确或通配路由，并连接到配置的上游。
+
+Cloudflare 会替换 Mirrox 生成的 5xx 响应时，可设置 `proxy_error_status = 200`。自包含错误页和 `X-Mirrox-Error-Status` 仍显示原始状态，4xx 不会被覆盖。若 Cloudflare 无法连接 Tunnel 或 Mirrox 进程，请求没有到达程序，Mirrox 无法渲染错误页。
 
 ## 环境变量覆盖
 

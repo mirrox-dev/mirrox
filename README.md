@@ -20,7 +20,7 @@ Mirrox is designed for self-hosted mirror gateways, private domain fronting, and
 
 ## Current status
 
-Mirrox is usable but still early. The DNS configuration model accepts `udp`, `tcp`, `dot`, and `doh`, and the codebase includes a resolver abstraction. The current resolver implementation still uses Tokio system DNS internally, so do not rely on custom DoH/DoT server enforcement until that wiring is completed.
+Mirrox is usable but still early. Its Hickory-based resolver honors configured `udp`, `tcp`, `dot`, and `doh` servers, timeout, and positive/negative cache TTL bounds. DNS-server hostnames are bootstrapped once through the host resolver so encrypted DNS endpoints can be reached.
 
 ## Quick start
 
@@ -79,6 +79,8 @@ docker run --rm \
 [server]
 listen = "127.0.0.1:3000"
 mode = "behind-proxy"
+# Set to 200 only when a fronting CDN replaces Mirrox-generated 5xx pages.
+# proxy_error_status = 200
 
 [dns]
 mode = "doh"
@@ -131,12 +133,16 @@ Wildcard routes use a single-label multi-domain model: `incoming_suffix = ".exam
 
 When Mirrox runs behind Cloudflare Tunnel, Cloudflare can route multiple public hostnames or a wildcard hostname to the same internal service, for example `http://mirrox:3000`. Cloudflare terminates public HTTPS, while Mirrox receives HTTP behind the proxy and chooses the upstream route from the incoming `Host` header.
 
+If Cloudflare replaces an origin 5xx body with its own page, set `[server].proxy_error_status = 200`. Mirrox still displays the original status and sends it in `X-Mirrox-Error-Status` while preventing the custom page from being cached. This applies only when the request reaches Mirrox. A Tunnel-to-Mirrox connectivity failure happens before Mirrox can render a response and must be handled in Cloudflare.
+
 ## Rewrite model
 
 Mirrox has two rewrite layers:
 
 - **HTTP layer**: request `Host`, `Origin`, `Referer`; response `Location`; cookie `Domain` attributes.
 - **Body layer**: supported text responses such as HTML, CSS, JavaScript, and JSON under `max_buffer_bytes`. When body rewriting is enabled, all configured route domain mappings are applied to every rewritable response — not just the upstream host from the matched route. This ensures cross-domain references are transparently rewritten.
+
+Rewrite plans are deterministic. The current route wins for its own upstream; if another upstream has multiple incoming aliases, the lexicographically smallest normalized incoming host is selected. Longer upstream hosts run before shorter suffix fallbacks. A root mapping such as `bgm.tv -> bangumi.lol` therefore rewrites unlisted `foo.bgm.tv`, while DNS-label boundaries keep unrelated names such as `fxbgm.tv`, `evil-bgm.tv`, and `bgm.tv.cn` unchanged. All replacements are applied to the original input in one pass, so replacement output cannot cascade into another rule.
 
 Body rewriting defaults to `enabled`. Set `body_rewrite = "http-only"` on a route, or set `MIRROX_REWRITE_BODY=http-only`, to disable body rewriting while keeping HTTP-layer rewriting.
 

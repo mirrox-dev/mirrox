@@ -20,7 +20,7 @@ Mirrox 适合自托管镜像网关、私有域名前置，以及需要显式 hos
 
 ## 当前状态
 
-Mirrox 已经可用，但仍处于早期阶段。DNS 配置模型接受 `udp`、`tcp`、`dot` 和 `doh`，代码中也包含 resolver 抽象。当前 resolver 实现仍通过 Tokio 系统 DNS 解析，因此在相关逻辑完成前，不建议依赖自定义 DoH/DoT 服务器的强制使用。
+Mirrox 已经可用，但仍处于早期阶段。基于 Hickory 的 resolver 会实际使用配置的 `udp`、`tcp`、`dot` 或 `doh` 服务器、查询超时以及正负缓存 TTL 范围。加密 DNS 服务器自身的 hostname 会先通过宿主机 resolver 完成一次引导解析。
 
 ## 快速开始
 
@@ -79,6 +79,8 @@ docker run --rm \
 [server]
 listen = "127.0.0.1:3000"
 mode = "behind-proxy"
+# 仅当前置 CDN 会替换 Mirrox 生成的 5xx 页面时设置：
+# proxy_error_status = 200
 
 [dns]
 mode = "doh"
@@ -131,12 +133,16 @@ upstream_port = 443
 
 Mirrox 部署在 Cloudflare Tunnel 后面时，Cloudflare 可以把多个公网 hostname 或一个通配 hostname 路由到同一个内部服务，例如 `http://mirrox:3000`。Cloudflare 负责公网 HTTPS 终止，Mirrox 在代理后方接收 HTTP，并根据传入的 `Host` 选择路由。
 
+如果 Cloudflare 会把源站 5xx 正文替换为自己的错误页，可设置 `[server].proxy_error_status = 200`。页面仍显示原始状态，响应头 `X-Mirrox-Error-Status` 也会保留该状态，同时错误页禁止缓存。此设置只对已经到达 Mirrox 的请求有效；Cloudflare Tunnel 无法连接 Mirrox 时，请求尚未进入程序，只能在 Cloudflare 侧处理。
+
 ## 重写模型
 
 Mirrox 有两层重写：
 
 - **HTTP 层**：请求 `Host`、`Origin`、`Referer`；响应 `Location`；Cookie `Domain` 属性。
 - **响应体层**：低于 `max_buffer_bytes` 的 HTML、CSS、JavaScript 和 JSON 等文本响应。启用响应体重写后，所有已配置路由的域名映射都会应用于每条可重写的响应——不仅仅是当前匹配路由的上游域名，从而确保跨域引用也被透明替换。
+
+重写计划是确定性的：当前请求匹配的路由对自身 upstream 拥有最高优先级；其他共享 upstream 的入口按标准化后的 `incoming` 字典序选择最小值；更长的 upstream 域名优先于较短的后缀托底规则。配置 `bgm.tv -> bangumi.lol` 根域映射后，未显式配置的 `foo.bgm.tv` 也会变成 `foo.bangumi.lol`，但域名标签边界会确保 `fxbgm.tv`、`evil-bgm.tv` 和 `bgm.tv.cn` 保持不变。所有规则只扫描原始输入一次，不会发生级联替换。
 
 响应体重写默认启用。可以在路由上设置 `body_rewrite = "http-only"`，或设置 `MIRROX_REWRITE_BODY=http-only`，以关闭响应体重写但保留 HTTP 层重写。
 

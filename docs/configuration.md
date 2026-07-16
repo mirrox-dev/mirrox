@@ -25,10 +25,15 @@ http_listen = "0.0.0.0:80"
 https_listen = "0.0.0.0:443"
 tls_cert = "/path/to/fullchain.pem"
 tls_key = "/path/to/privkey.pem"
+connect_timeout_ms = 10000
+request_timeout_ms = 60000
+# proxy_error_status = 200
 ```
 
 - `listen`: address used by the current HTTP server.
 - `mode`: `behind-proxy` or `direct`. The current implementation binds `listen`; `http_listen`, `https_listen`, `tls_cert`, and `tls_key` are reserved for direct public-port deployments.
+- `connect_timeout_ms` and `request_timeout_ms`: bound upstream connection setup and the complete upstream request.
+- `proxy_error_status`: optional outward status used only for Mirrox-generated 5xx pages. Set it to `200` when a fronting CDN replaces 5xx bodies. The page and `X-Mirrox-Error-Status` retain the original error. Informational, 204, 205, 304, and out-of-range values are rejected.
 
 ## DNS settings
 
@@ -41,7 +46,7 @@ cache_max_ttl_seconds = 300
 timeout_ms = 2000
 ```
 
-Supported config values for `mode` are `udp`, `tcp`, `dot`, and `doh`. The resolver abstraction is present, but this implementation currently resolves through Tokio system DNS; custom DoH/DoT server enforcement still needs hardening before relying on it in production.
+Supported `mode` values are `udp`, `tcp`, `dot`, and `doh`. Mirrox builds a Hickory resolver with the selected protocol, servers, timeout, and positive/negative cache TTL bounds. URL schemes must match the mode (`https://` for DoH and `tls://` for DoT); DoH endpoints use `/dns-query`. Hostnames of configured DNS servers are bootstrapped through the host resolver.
 
 ## Upstream proxy settings
 
@@ -79,6 +84,8 @@ max_buffer_bytes = 2097152
 - `max_buffer_bytes`: maximum text response size buffered for body rewriting. Larger responses are streamed through unchanged.
 
 SSE (`text/event-stream`) and non-text assets are streamed through without body rewriting.
+
+Rewrite target selection is deterministic: the current route wins for its own upstream, ambiguous sibling mappings choose the lexicographically smallest normalized incoming host, and longer upstream hosts precede shorter suffix rules. A configured root mapping such as `bgm.tv -> bangumi.lol` acts as the intentional fallback for `foo.bgm.tv`. Matching observes DNS-label boundaries, so `fxbgm.tv`, `evil-bgm.tv`, and `bgm.tv.cn` are not modified. The engine scans original input once and does not cascade replacement output through later rules.
 
 ## Script injection
 
@@ -146,6 +153,8 @@ Wildcard routes support the same upstream connection fields as exact routes: `up
 ## Cloudflare Tunnel deployments
 
 In `behind-proxy` mode, Mirrox is intended to sit behind another HTTPS terminator. With Cloudflare Tunnel, configure multiple public hostnames or a wildcard hostname to point at the same internal service, such as `http://mirrox:3000`. Cloudflare handles public HTTPS certificates and forwards HTTP to Mirrox inside your private network. Mirrox then reads the forwarded `Host` header, matches it against exact or wildcard routes, and connects to the configured upstream.
+
+When Cloudflare replaces a Mirrox-generated 5xx response, set `proxy_error_status = 200`. The original status stays visible in the self-contained page and in `X-Mirrox-Error-Status`; 4xx statuses are never overridden. If Cloudflare cannot reach the Tunnel or Mirrox process, Mirrox never receives the request and cannot render this page.
 
 ## Environment overrides
 
