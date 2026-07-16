@@ -94,3 +94,13 @@ fn rewrites_cookie_domain_case_insensitively_without_substring_matches() {
         "id=1; Domain=.fxbgm.tv; Path=/"
     );
 }
+
+#[test]
+fn whitespace_only_cookie_domain_is_preserved_without_panicking() {
+    let cookie = "id=1; Domain=   ; Path=/";
+
+    assert_eq!(
+        rewrite_cookie_domain(cookie, "bgm.tv", "bangumi.lol"),
+        cookie
+    );
+}

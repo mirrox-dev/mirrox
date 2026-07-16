@@ -53,8 +53,8 @@ pub async fn build_router_with_state(state: Arc<ProxyState>) -> Result<Router, A
         .layer(PropagateRequestIdLayer::new(request_id_header));
 
     Ok(router
-        .layer(middleware)
         .fallback(proxy_handler)
+        .layer(middleware)
         .with_state(state))
 }
 

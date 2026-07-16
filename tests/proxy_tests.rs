@@ -1023,5 +1023,37 @@ async fn upstream_error_page_respects_accept_language() {
 
     response.assert_status(axum::http::StatusCode::BAD_GATEWAY);
     response.assert_text_contains("上游服务返回错误");
-    response.assert_text_contains("api.bgm.tv");
+    response.assert_text_contains("api.example.com");
+}
+
+#[tokio::test]
+async fn public_error_page_does_not_expose_the_upstream_hostname() {
+    let upstream = Router::new().route("/*path", any(bad_gateway_upstream));
+    let server = proxy_for_error_status(upstream, 502).await;
+
+    let response = server
+        .get("/failure")
+        .add_header("host", "api.example.com")
+        .await;
+    let body = response.text();
+
+    response.assert_status(axum::http::StatusCode::BAD_GATEWAY);
+    assert!(body.contains("api.example.com"));
+    assert!(!body.contains("api.bgm.tv"));
+}
+
+#[tokio::test]
+async fn non_get_error_page_does_not_offer_a_get_retry_link() {
+    let upstream = Router::new().route("/*path", any(bad_gateway_upstream));
+    let server = proxy_for_error_status(upstream, 502).await;
+
+    let response = server
+        .post("/failure")
+        .add_header("host", "api.example.com")
+        .await;
+    let body = response.text();
+
+    response.assert_status(axum::http::StatusCode::BAD_GATEWAY);
+    assert!(!body.contains("class=\"retry\" href=\"\""));
+    assert!(body.contains("Return to the previous page"));
 }

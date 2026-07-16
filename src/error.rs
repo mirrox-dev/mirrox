@@ -37,6 +37,7 @@ pub struct ErrorContext {
     pub incoming_host: String,
     pub language: String,
     pub proxy_error_status: Option<StatusCode>,
+    pub retry_allowed: bool,
 }
 
 impl Default for ErrorContext {
@@ -45,6 +46,7 @@ impl Default for ErrorContext {
             incoming_host: String::new(),
             language: "en".to_string(),
             proxy_error_status: None,
+            retry_allowed: false,
         }
     }
 }
@@ -137,27 +139,29 @@ impl AppError {
 
     fn gateway_error_fields(&self) -> Option<GatewayErrorFields> {
         match self {
-            AppError::Dns { host, context, .. } => Some(GatewayErrorFields {
+            AppError::Dns { context, .. } => Some(GatewayErrorFields {
                 failure_kind: FailureKind::Dns,
                 language: Language::from_code(&context.language),
-                domain: host.clone(),
+                domain: context.incoming_host.clone(),
+                retry_allowed: context.retry_allowed,
             }),
             AppError::Upstream { context, .. } => Some(GatewayErrorFields {
                 failure_kind: FailureKind::Connection,
                 language: Language::from_code(&context.language),
                 domain: context.incoming_host.clone(),
+                retry_allowed: context.retry_allowed,
             }),
             AppError::UpstreamTimeout { context } => Some(GatewayErrorFields {
                 failure_kind: FailureKind::Timeout,
                 language: Language::from_code(&context.language),
                 domain: context.incoming_host.clone(),
+                retry_allowed: context.retry_allowed,
             }),
-            AppError::UpstreamError {
-                domain, context, ..
-            } => Some(GatewayErrorFields {
+            AppError::UpstreamError { context, .. } => Some(GatewayErrorFields {
                 failure_kind: FailureKind::Upstream,
                 language: Language::from_code(&context.language),
-                domain: domain.clone(),
+                domain: context.incoming_host.clone(),
+                retry_allowed: context.retry_allowed,
             }),
             AppError::Config(_) | AppError::RouteNotFound(_) => None,
         }
@@ -168,6 +172,7 @@ struct GatewayErrorFields {
     failure_kind: FailureKind,
     language: Language,
     domain: String,
+    retry_allowed: bool,
 }
 
 impl IntoResponse for AppError {
@@ -181,6 +186,7 @@ impl IntoResponse for AppError {
                 status: original_status,
                 domain: &fields.domain,
                 failure_kind: fields.failure_kind,
+                retry_allowed: fields.retry_allowed,
             });
             let mut builder = Response::builder()
                 .status(response_status)

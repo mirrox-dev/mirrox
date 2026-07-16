@@ -149,7 +149,12 @@ async fn direct_connection_tries_all_resolved_addresses() {
     let unavailable_addr = unavailable.local_addr().unwrap();
     drop(unavailable);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = loop {
+        let candidate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if candidate.local_addr().unwrap() != unavailable_addr {
+            break candidate;
+        }
+    };
     let available_addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();

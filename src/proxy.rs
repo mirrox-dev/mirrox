@@ -14,7 +14,7 @@ use axum::http::header::{
     ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION,
     SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SET_COOKIE, UPGRADE, USER_AGENT,
 };
-use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use flate2::read::{DeflateDecoder, GzDecoder};
 use futures_util::StreamExt;
 use std::future::Future;
@@ -75,6 +75,7 @@ pub async fn proxy_handler(
         )
         .to_string(),
         proxy_error_status: state.error_override(),
+        retry_allowed: matches!(*request.method(), Method::GET | Method::HEAD),
     };
 
     if is_websocket_upgrade(request.headers()) {

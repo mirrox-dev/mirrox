@@ -147,9 +147,12 @@ fn rewrite_cookie_segment(segment: &str, from_domain: &str, to_domain: &str) -> 
     }
 
     let value_with_spacing = &attribute[equals_index + 1..];
+    let trimmed_value = value_with_spacing.trim();
+    if trimmed_value.is_empty() {
+        return segment.to_string();
+    }
     let leading_len = value_with_spacing.len() - value_with_spacing.trim_start().len();
-    let trailing_len = value_with_spacing.len() - value_with_spacing.trim_end().len();
-    let value_end = value_with_spacing.len().saturating_sub(trailing_len);
+    let value_end = leading_len + trimmed_value.len();
     let value = &value_with_spacing[leading_len..value_end];
     let (dot, host) = value
         .strip_prefix('.')

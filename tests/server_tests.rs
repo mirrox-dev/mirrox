@@ -54,3 +54,17 @@ async fn responses_propagate_a_generated_request_id() {
         .unwrap();
     assert!(uuid::Uuid::parse_str(request_id).is_ok());
 }
+
+#[tokio::test]
+async fn fallback_responses_also_propagate_request_ids() {
+    let app = build_router(config()).await.unwrap();
+    let server = TestServer::new(app).unwrap();
+
+    let response = server
+        .get("/unknown")
+        .add_header("host", "unknown.example.com")
+        .await;
+
+    response.assert_status(axum::http::StatusCode::MISDIRECTED_REQUEST);
+    assert!(response.headers().contains_key("x-request-id"));
+}

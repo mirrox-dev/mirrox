@@ -29,6 +29,7 @@ pub(crate) struct ErrorPage<'a> {
     pub status: StatusCode,
     pub domain: &'a str,
     pub failure_kind: FailureKind,
+    pub retry_allowed: bool,
 }
 
 struct LocalizedCopy {
@@ -39,6 +40,7 @@ struct LocalizedCopy {
     target_label: &'static str,
     state_label: &'static str,
     retry_label: &'static str,
+    retry_guidance: &'static str,
     diagnostic_label: &'static str,
     client_label: &'static str,
     mirrox_label: &'static str,
@@ -57,6 +59,17 @@ pub(crate) fn render(page: ErrorPage<'_>) -> String {
     let domain = escape_html(page.domain);
     let title = escape_html(copy.title);
     let description = escape_html(copy.description);
+    let action = if page.retry_allowed {
+        format!(
+            r#"<a class="retry" href="">{}<span aria-hidden="true">↗</span></a>"#,
+            copy.retry_label
+        )
+    } else {
+        format!(
+            r#"<p class="retry-guidance" role="status">{}</p>"#,
+            copy.retry_guidance
+        )
+    };
 
     format!(
         r#"<!doctype html>
@@ -97,7 +110,7 @@ pub(crate) fn render(page: ErrorPage<'_>) -> String {
                     </div>
                 </dl>
 
-                <a class="retry" href="">{retry_label}<span aria-hidden="true">↗</span></a>
+                {action}
             </div>
         </section>
 
@@ -140,7 +153,7 @@ pub(crate) fn render(page: ErrorPage<'_>) -> String {
         domain = domain,
         state_label = copy.state_label,
         failed_label = copy.failed_label,
-        retry_label = copy.retry_label,
+        action = action,
         diagnostic_label = copy.diagnostic_label,
         client_label = copy.client_label,
         reachable_label = copy.reachable_label,
@@ -179,6 +192,7 @@ fn localized_copy(language: Language, kind: FailureKind) -> LocalizedCopy {
             target_label: "Target",
             state_label: "State",
             retry_label: "Retry request",
+            retry_guidance: "Return to the previous page and submit the request again.",
             diagnostic_label: "Request path diagnostic",
             client_label: "CLIENT",
             mirrox_label: "MIRROX",
@@ -208,6 +222,7 @@ fn localized_copy(language: Language, kind: FailureKind) -> LocalizedCopy {
             target_label: "目标",
             state_label: "状态",
             retry_label: "重试请求",
+            retry_guidance: "请返回上一页并重新提交请求。",
             diagnostic_label: "请求链路诊断",
             client_label: "客户端",
             mirrox_label: "MIRROX",
@@ -401,6 +416,13 @@ dd {
     transition: background-color 140ms ease, color 140ms ease;
 }
 .retry span { font-family: var(--mono); }
+.retry-guidance {
+    max-width: 38ch;
+    margin: 1.8rem 0 0;
+    color: var(--muted);
+    font-size: .82rem;
+    line-height: 1.5;
+}
 .retry:hover { background: transparent; color: var(--ink); }
 .retry:focus-visible { outline: 3px solid var(--focus); outline-offset: 4px; }
 
@@ -519,6 +541,7 @@ mod tests {
             status: StatusCode::BAD_GATEWAY,
             domain: "api.example.com",
             failure_kind: FailureKind::Upstream,
+            retry_allowed: true,
         });
 
         assert!(html.contains("<html lang=\"en\">"));
@@ -541,6 +564,7 @@ mod tests {
             status: StatusCode::GATEWAY_TIMEOUT,
             domain: "api.example.com",
             failure_kind: FailureKind::Timeout,
+            retry_allowed: true,
         });
 
         assert!(html.contains("<html lang=\"zh-CN\">"));
@@ -555,6 +579,7 @@ mod tests {
             status: StatusCode::BAD_GATEWAY,
             domain: "<script>alert(1)</script>&\"",
             failure_kind: FailureKind::Upstream,
+            retry_allowed: true,
         });
 
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;&amp;&quot;"));
@@ -568,6 +593,7 @@ mod tests {
             status: StatusCode::BAD_GATEWAY,
             domain: "api.example.com",
             failure_kind: FailureKind::Connection,
+            retry_allowed: true,
         });
 
         assert!(html.contains(">502<"));
