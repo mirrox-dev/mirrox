@@ -205,3 +205,93 @@ fn matched_route_prefers_route_upstream_proxy_override() {
 
     assert_eq!(route.upstream_proxy.as_deref(), Some("direct"));
 }
+
+fn shared_upstream_table(reversed: bool) -> RouteTable {
+    let routes = if reversed {
+        r#"
+        [[routes]]
+        incoming = "www.bangumi.lol"
+        upstream = "www.bgm.tv"
+
+        [[routes]]
+        incoming = "api.bangumi.lol"
+        upstream = "api.bgm.tv"
+
+        [[routes]]
+        incoming = "www.bangumi.one"
+        upstream = "www.bgm.tv"
+
+        [[routes]]
+        incoming = "api.bangumi.one"
+        upstream = "api.bgm.tv"
+        "#
+    } else {
+        r#"
+        [[routes]]
+        incoming = "api.bangumi.one"
+        upstream = "api.bgm.tv"
+
+        [[routes]]
+        incoming = "www.bangumi.one"
+        upstream = "www.bgm.tv"
+
+        [[routes]]
+        incoming = "api.bangumi.lol"
+        upstream = "api.bgm.tv"
+
+        [[routes]]
+        incoming = "www.bangumi.lol"
+        upstream = "www.bgm.tv"
+        "#
+    };
+    let config = AppConfig::from_toml_str(&format!(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        {routes}
+        "#
+    ))
+    .unwrap();
+    RouteTable::from_config(&config)
+}
+
+#[test]
+fn current_route_wins_for_its_shared_upstream() {
+    let table = shared_upstream_table(false);
+    let route = table.match_host("api.bangumi.one").unwrap();
+
+    assert_eq!(
+        table
+            .rewrite_plan_for(&route)
+            .rewrite("https://api.bgm.tv/v0"),
+        "https://api.bangumi.one/v0"
+    );
+}
+
+#[test]
+fn ambiguous_sibling_uses_lexicographically_first_incoming() {
+    let table = shared_upstream_table(false);
+    let route = table.match_host("www.bangumi.one").unwrap();
+
+    assert_eq!(
+        table
+            .rewrite_plan_for(&route)
+            .rewrite("https://api.bgm.tv/v0"),
+        "https://api.bangumi.lol/v0"
+    );
+}
+
+#[test]
+fn rewrite_plan_is_independent_of_declaration_order() {
+    let first = shared_upstream_table(false);
+    let reversed = shared_upstream_table(true);
+    let first_route = first.match_host("www.bangumi.one").unwrap();
+    let reversed_route = reversed.match_host("www.bangumi.one").unwrap();
+    let input = "https://api.bgm.tv https://www.bgm.tv";
+
+    assert_eq!(
+        first.rewrite_plan_for(&first_route).rewrite(input),
+        reversed.rewrite_plan_for(&reversed_route).rewrite(input)
+    );
+}

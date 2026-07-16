@@ -1,5 +1,6 @@
 use crate::config::{normalize_host, AppConfig, BodyRewriteMode, UpstreamScheme};
-use std::collections::{HashMap, HashSet};
+use crate::rewrite::{RewritePlan, RewriteRule};
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchedRoute {
@@ -17,6 +18,7 @@ pub struct MatchedRoute {
 #[derive(Debug, Clone)]
 pub struct RouteTable {
     exact: HashMap<String, MatchedRoute>,
+    ordered_exact: Vec<MatchedRoute>,
     wildcard: Vec<WildcardRule>,
     global_scripts: Vec<String>,
 }
@@ -38,24 +40,24 @@ impl RouteTable {
     pub fn from_config(config: &AppConfig) -> Self {
         let global_scripts = &config.scripts.global;
 
-        let exact = config
+        let ordered_exact: Vec<_> = config
             .routes
             .iter()
             .map(|route| {
-                let rewrite = route
+                let body_rewrite = route
                     .body_rewrite
                     .clone()
                     .unwrap_or_else(|| config.rewrite.body.clone());
                 let upstream_port = route
                     .upstream_port
                     .unwrap_or_else(|| route.upstream_scheme.default_port());
-                // Merge: global scripts first, then route-specific scripts.
                 let mut scripts = global_scripts.clone();
                 scripts.extend(route.scripts.iter().cloned());
-                let matched = MatchedRoute {
+
+                MatchedRoute {
                     incoming_host: route.incoming.clone(),
                     upstream_host: route.upstream.clone(),
-                    body_rewrite: rewrite,
+                    body_rewrite,
                     upstream_proxy: route
                         .upstream_proxy
                         .clone()
@@ -64,9 +66,13 @@ impl RouteTable {
                     upstream_port,
                     user_agent: route.user_agent.clone(),
                     scripts,
-                };
-                (route.incoming.clone(), matched)
+                }
             })
+            .collect();
+        let exact = ordered_exact
+            .iter()
+            .cloned()
+            .map(|route| (route.incoming_host.clone(), route))
             .collect();
 
         let wildcard = config
@@ -97,54 +103,42 @@ impl RouteTable {
 
         Self {
             exact,
+            ordered_exact,
             wildcard,
             global_scripts: global_scripts.clone(),
         }
     }
 
-    /// Returns all (upstream, incoming) host pairs from exact routes,
-    /// sorted by upstream host length descending to prevent substring collisions
-    /// (e.g. replacing "bgm.tv" before "lain.bgm.tv" would corrupt the latter).
-    /// Results are deterministic: when two routes share the same upstream,
-    /// the one that appears first in the config wins.
+    /// Returns one deterministic `(upstream, incoming)` pair per exact
+    /// upstream. Shared upstreams select the lexicographically smallest
+    /// normalized incoming host.
     pub fn all_rewrite_pairs(&self) -> Vec<(String, String)> {
-        let mut seen_upstreams = HashSet::new();
-        let mut pairs: Vec<(String, String)> = self
-            .exact
-            .values()
-            .filter(|r| seen_upstreams.insert(r.upstream_host.clone()))
-            .map(|r| (r.upstream_host.clone(), r.incoming_host.clone()))
-            .collect();
-        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
-        pairs
+        sorted_pairs(self.lexical_rewrite_targets())
     }
 
-    /// Rewrite pairs to apply to a response served for `route`.
+    /// Builds the response rewrite plan for a matched route.
     ///
-    /// Includes the current route's own (upstream, incoming) mapping plus
-    /// every exact route's mapping for *different* upstreams — used to rewrite
-    /// cross-domain references in `Location` headers and bodies (e.g. a redirect
-    /// from `api.bgm.tv` pointing at `lain.bgm.tv`).
-    ///
-    /// When multiple incoming hosts share the same upstream, the current
-    /// route's mapping takes priority; conflicting entries from other routes
-    /// with the same upstream are excluded so they don't overwrite each other.
-    ///
-    /// Sorted by upstream host length descending to prevent substring collisions.
+    /// The current route always wins for its own upstream. Ambiguous mappings
+    /// for sibling upstreams use their lexicographically smallest incoming host.
+    pub fn rewrite_plan_for(&self, current: &MatchedRoute) -> RewritePlan {
+        let mut selected = self.lexical_rewrite_targets();
+        selected.insert(current.upstream_host.clone(), current.incoming_host.clone());
+
+        RewritePlan::new(
+            selected
+                .into_iter()
+                .map(|(from, to)| RewriteRule::new(from, to))
+                .collect(),
+        )
+    }
+
+    /// Compatibility view of [`Self::rewrite_plan_for`].
     pub fn rewrite_pairs_for(&self, route: &MatchedRoute) -> Vec<(String, String)> {
-        let mut pairs: Vec<(String, String)> = self
-            .exact
-            .values()
-            .filter(|r| r.upstream_host != route.upstream_host)
-            .map(|r| (r.upstream_host.clone(), r.incoming_host.clone()))
-            .collect();
-        // Deduplicate by upstream: keep the first encountered (config order).
-        let mut seen = HashSet::new();
-        pairs.retain(|(upstream, _)| seen.insert(upstream.clone()));
-        // Always include the current route's own mapping.
-        pairs.push((route.upstream_host.clone(), route.incoming_host.clone()));
-        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
-        pairs
+        self.rewrite_plan_for(route)
+            .rules()
+            .iter()
+            .map(|rule| (rule.from().to_string(), rule.to().to_string()))
+            .collect()
     }
 
     pub fn match_host(&self, host: &str) -> Option<MatchedRoute> {
@@ -158,7 +152,6 @@ impl RouteTable {
             if prefix.is_empty() || prefix.contains('.') {
                 return None;
             }
-            // Merge: global scripts first, then route-specific scripts.
             let mut scripts = self.global_scripts.clone();
             scripts.extend(rule.scripts.iter().cloned());
             Some(MatchedRoute {
@@ -173,6 +166,32 @@ impl RouteTable {
             })
         })
     }
+
+    fn lexical_rewrite_targets(&self) -> BTreeMap<String, String> {
+        let mut selected = BTreeMap::new();
+        for route in &self.ordered_exact {
+            selected
+                .entry(route.upstream_host.clone())
+                .and_modify(|incoming: &mut String| {
+                    if route.incoming_host < *incoming {
+                        incoming.clone_from(&route.incoming_host);
+                    }
+                })
+                .or_insert_with(|| route.incoming_host.clone());
+        }
+        selected
+    }
+}
+
+fn sorted_pairs(targets: BTreeMap<String, String>) -> Vec<(String, String)> {
+    let mut pairs: Vec<_> = targets.into_iter().collect();
+    pairs.sort_by(|a, b| {
+        b.0.len()
+            .cmp(&a.0.len())
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    pairs
 }
 
 pub fn normalize_request_host(host: &str) -> Option<String> {
