@@ -937,3 +937,75 @@ async fn response_rewrite_plan_does_not_cascade_between_routes() {
     response.assert_text_contains("https://b.example/path");
     assert!(!response.text().contains("https://c.example/path"));
 }
+
+async fn bad_gateway_upstream() -> impl IntoResponse {
+    axum::http::StatusCode::BAD_GATEWAY
+}
+
+async fn not_found_upstream() -> impl IntoResponse {
+    axum::http::StatusCode::NOT_FOUND
+}
+
+async fn proxy_for_error_status(
+    upstream: Router,
+    proxy_error_status: u16,
+) -> axum_test::TestServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let config = AppConfig::from_toml_str(&format!(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+        proxy_error_status = {proxy_error_status}
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        upstream_scheme = "http"
+        "#
+    ))
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+
+    axum_test::TestServer::new(app).unwrap()
+}
+
+#[tokio::test]
+async fn proxy_error_status_tunnels_custom_5xx_without_losing_original_status() {
+    let upstream = Router::new().route("/*path", any(bad_gateway_upstream));
+    let server = proxy_for_error_status(upstream, 200).await;
+
+    let response = server
+        .get("/failure")
+        .add_header("host", "api.example.com")
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(response.headers()["x-mirrox-error-status"], "502");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    response.assert_text_contains("502");
+    assert!(!response.text().contains(">200<"));
+}
+
+#[tokio::test]
+async fn proxy_error_status_does_not_override_upstream_4xx() {
+    let upstream = Router::new().route("/*path", any(not_found_upstream));
+    let server = proxy_for_error_status(upstream, 200).await;
+
+    let response = server
+        .get("/missing")
+        .add_header("host", "api.example.com")
+        .await;
+
+    response.assert_status(axum::http::StatusCode::NOT_FOUND);
+    response.assert_text_contains("404");
+}

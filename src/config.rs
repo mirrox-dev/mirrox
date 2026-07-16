@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use anyhow::Context;
+use http::StatusCode;
 use serde::Deserialize;
 use std::{fs, path::Path};
 
@@ -296,6 +297,24 @@ impl AppConfig {
             return Err(AppError::Config(
                 "dns cache_min_ttl_seconds cannot exceed cache_max_ttl_seconds".into(),
             ));
+        }
+        if let Some(code) = self.server.proxy_error_status {
+            let status = StatusCode::from_u16(code).map_err(|_| {
+                AppError::Config(format!(
+                    "proxy_error_status must be a valid HTTP response status, got {code}"
+                ))
+            })?;
+            if code > 599
+                || status.is_informational()
+                || matches!(
+                    status,
+                    StatusCode::NO_CONTENT | StatusCode::RESET_CONTENT | StatusCode::NOT_MODIFIED
+                )
+            {
+                return Err(AppError::Config(format!(
+                    "proxy_error_status {code} cannot carry an HTML error page"
+                )));
+            }
         }
         if let Some(proxy) = &self.upstream_proxy.default {
             validate_upstream_proxy_value(proxy)?;

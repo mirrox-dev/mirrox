@@ -74,7 +74,7 @@ pub async fn proxy_handler(
                 .and_then(|v| v.to_str().ok()),
         )
         .to_string(),
-        error_status_override: state.error_override(),
+        proxy_error_status: state.error_override(),
     };
 
     if is_websocket_upgrade(request.headers()) {
@@ -123,7 +123,7 @@ async fn forward_http(
             anyhow::Error::new(err),
             String::new(),
             String::new(),
-            error_ctx.error_status_override,
+            error_ctx.proxy_error_status,
         )
     })?;
 
@@ -152,7 +152,7 @@ async fn forward_http(
     let connector = UpstreamConnector::new(state.dns.clone());
     let route_for_connect = route.clone();
     let connect_timeout = Duration::from_millis(state.config.server.connect_timeout_ms);
-    let override_status = error_ctx.error_status_override;
+    let override_status = error_ctx.proxy_error_status;
     let service = service_fn(move |uri: Uri| {
         let connector = connector.clone();
         let route = route_for_connect.clone();
@@ -197,18 +197,14 @@ async fn forward_http(
     let upstream_response = timeout(request_timeout, client.request(upstream_request))
         .await
         .map_err(|_| {
-            AppError::UpstreamTimeout(
-                String::new(),
-                String::new(),
-                error_ctx.error_status_override,
-            )
+            AppError::UpstreamTimeout(String::new(), String::new(), error_ctx.proxy_error_status)
         })?
         .map_err(|err| {
             AppError::Upstream(
                 anyhow::Error::new(err),
                 String::new(),
                 String::new(),
-                error_ctx.error_status_override,
+                error_ctx.proxy_error_status,
             )
         })?;
 
@@ -327,7 +323,7 @@ async fn rewrite_response(
             domain: route.upstream_host.clone(),
             incoming_host: String::new(),
             language: String::new(),
-            error_status_override: error_ctx.error_status_override,
+            proxy_error_status: error_ctx.proxy_error_status,
         });
     }
 
@@ -364,7 +360,7 @@ async fn rewrite_response(
             anyhow::Error::new(err),
             String::new(),
             String::new(),
-            error_ctx.error_status_override,
+            error_ctx.proxy_error_status,
         )
     })?;
 
@@ -382,7 +378,7 @@ async fn rewrite_response(
                     anyhow::Error::new(err),
                     String::new(),
                     String::new(),
-                    error_ctx.error_status_override,
+                    error_ctx.proxy_error_status,
                 )
             })?;
             parts.headers.remove("content-encoding");
@@ -396,7 +392,7 @@ async fn rewrite_response(
                     anyhow::Error::new(err),
                     String::new(),
                     String::new(),
-                    error_ctx.error_status_override,
+                    error_ctx.proxy_error_status,
                 )
             })?;
             parts.headers.remove("content-encoding");
@@ -410,7 +406,7 @@ async fn rewrite_response(
                     anyhow::Error::new(err),
                     String::new(),
                     String::new(),
-                    error_ctx.error_status_override,
+                    error_ctx.proxy_error_status,
                 )
             })?;
             parts.headers.remove("content-encoding");

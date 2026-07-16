@@ -153,7 +153,7 @@ impl DnsResolver for HickoryDnsResolver {
                 source: anyhow::Error::new(source),
                 incoming_host: String::new(),
                 language: String::new(),
-                error_status_override: None,
+                proxy_error_status: None,
             })?;
         let addresses: Vec<_> = lookups.iter().map(|ip| SocketAddr::new(ip, port)).collect();
         if addresses.is_empty() {
@@ -162,7 +162,7 @@ impl DnsResolver for HickoryDnsResolver {
                 source: anyhow::anyhow!("no addresses returned for {host}"),
                 incoming_host: String::new(),
                 language: String::new(),
-                error_status_override: None,
+                proxy_error_status: None,
             });
         }
         Ok(addresses)

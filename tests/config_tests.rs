@@ -237,3 +237,42 @@ fn rejects_invalid_upstream_proxy_scheme() {
 
     assert!(error.to_string().contains("invalid upstream proxy"));
 }
+
+#[test]
+fn accepts_proxy_error_status_that_can_carry_html() {
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        proxy_error_status = 200
+
+        [[routes]]
+        incoming = "api.example.com"
+        upstream = "api.bgm.tv"
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(config.server.proxy_error_status, Some(200));
+}
+
+#[test]
+fn rejects_proxy_error_status_without_a_response_body() {
+    for status in [199, 204, 205, 304, 600] {
+        let error = AppConfig::from_toml_str(&format!(
+            r#"
+            [server]
+            proxy_error_status = {status}
+
+            [[routes]]
+            incoming = "api.example.com"
+            upstream = "api.bgm.tv"
+            "#
+        ))
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("proxy_error_status"),
+            "unexpected error for status {status}: {error}"
+        );
+    }
+}

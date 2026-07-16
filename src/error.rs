@@ -15,7 +15,7 @@ pub enum AppError {
         source: anyhow::Error,
         incoming_host: String,
         language: String,
-        error_status_override: Option<StatusCode>,
+        proxy_error_status: Option<StatusCode>,
     },
     #[error("upstream request failed: {0}")]
     Upstream(anyhow::Error, String, String, Option<StatusCode>),
@@ -27,7 +27,7 @@ pub enum AppError {
         domain: String,
         incoming_host: String,
         language: String,
-        error_status_override: Option<StatusCode>,
+        proxy_error_status: Option<StatusCode>,
     },
 }
 
@@ -37,7 +37,7 @@ pub enum AppError {
 pub struct ErrorContext {
     pub incoming_host: String,
     pub language: String,
-    pub error_status_override: Option<StatusCode>,
+    pub proxy_error_status: Option<StatusCode>,
 }
 
 impl AppError {
@@ -53,40 +53,31 @@ impl AppError {
                 source,
                 incoming_host: ctx.incoming_host.clone(),
                 language: ctx.language.clone(),
-                error_status_override: ctx.error_status_override,
+                proxy_error_status: ctx.proxy_error_status,
             },
             AppError::Upstream(err, _, _, _) => AppError::Upstream(
                 err,
                 ctx.incoming_host.clone(),
                 ctx.language.clone(),
-                ctx.error_status_override,
+                ctx.proxy_error_status,
             ),
             AppError::UpstreamTimeout(_, _, _) => AppError::UpstreamTimeout(
                 ctx.incoming_host.clone(),
                 ctx.language.clone(),
-                ctx.error_status_override,
+                ctx.proxy_error_status,
             ),
             AppError::UpstreamError { status, domain, .. } => AppError::UpstreamError {
                 status,
                 domain,
                 incoming_host: ctx.incoming_host.clone(),
                 language: ctx.language.clone(),
-                error_status_override: ctx.error_status_override,
+                proxy_error_status: ctx.proxy_error_status,
             },
             other => other,
         }
     }
 
-    /// Returns the HTTP status to use for the response, respecting the
-    /// `proxy_error_status` override when set (useful when behind a CDN
-    /// that intercepts 5xx responses).
-    fn response_status(&self) -> StatusCode {
-        if let Some(override_status) = self.error_status_override() {
-            let code = u16::from(override_status);
-            if let Ok(status) = StatusCode::from_u16(code) {
-                return status;
-            }
-        }
+    fn original_status(&self) -> StatusCode {
         match self {
             AppError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::RouteNotFound(_) => StatusCode::MISDIRECTED_REQUEST,
@@ -97,18 +88,25 @@ impl AppError {
         }
     }
 
-    fn error_status_override(&self) -> Option<StatusCode> {
+    /// Only custom 5xx responses may use the CDN tunneling status.
+    fn response_status(&self, original: StatusCode) -> StatusCode {
+        if original.is_server_error() {
+            self.proxy_error_status().unwrap_or(original)
+        } else {
+            original
+        }
+    }
+
+    fn proxy_error_status(&self) -> Option<StatusCode> {
         match self {
             AppError::Dns {
-                error_status_override,
-                ..
-            } => *error_status_override,
-            AppError::Upstream(_, _, _, s) => *s,
-            AppError::UpstreamTimeout(_, _, s) => *s,
+                proxy_error_status, ..
+            } => *proxy_error_status,
+            AppError::Upstream(_, _, _, status) => *status,
+            AppError::UpstreamTimeout(_, _, status) => *status,
             AppError::UpstreamError {
-                error_status_override,
-                ..
-            } => *error_status_override,
+                proxy_error_status, ..
+            } => *proxy_error_status,
             _ => None,
         }
     }
@@ -178,24 +176,23 @@ struct GatewayErrorFields {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = self.response_status();
+        let original_status = self.original_status();
+        let response_status = self.response_status(original_status);
 
         if let Some(fields) = self.gateway_error_fields() {
             let is_zh = fields.language == "zh";
             let (error_type, badge_label, badge_class, error_desc, domain) =
                 error_page_locale(&fields, is_zh);
-
-            let template: &str = if is_zh {
+            let template = if is_zh {
                 ERROR_PAGE_TEMPLATE_ZH
             } else {
                 ERROR_PAGE_TEMPLATE_EN
             };
-
             let html = template
-                .replace("{status_code}", status.as_str())
+                .replace("{status_code}", original_status.as_str())
                 .replace(
                     "{status_reason}",
-                    status.canonical_reason().unwrap_or("Error"),
+                    original_status.canonical_reason().unwrap_or("Error"),
                 )
                 .replace("{error_type}", error_type)
                 .replace("{error_desc}", error_desc)
@@ -203,14 +200,30 @@ impl IntoResponse for AppError {
                 .replace("{badge_label}", badge_label)
                 .replace("{badge_class}", badge_class);
 
-            return Response::builder()
-                .status(status)
-                .header("content-type", "text/html; charset=utf-8")
-                .body(Body::from(html))
-                .unwrap();
+            let mut builder = Response::builder()
+                .status(response_status)
+                .header("content-type", "text/html; charset=utf-8");
+            if original_status.is_server_error() {
+                builder = builder
+                    .header("x-mirrox-error-status", original_status.as_str())
+                    .header("cache-control", "no-store")
+                    .header("x-content-type-options", "nosniff");
+            }
+            return match builder.body(Body::from(html)) {
+                Ok(response) => response,
+                Err(_) => (
+                    response_status,
+                    original_status.canonical_reason().unwrap_or("proxy error"),
+                )
+                    .into_response(),
+            };
         }
 
-        (status, status.canonical_reason().unwrap_or("proxy error")).into_response()
+        (
+            response_status,
+            original_status.canonical_reason().unwrap_or("proxy error"),
+        )
+            .into_response()
     }
 }
 
