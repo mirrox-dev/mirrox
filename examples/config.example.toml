@@ -1,0 +1,54 @@
+[server]
+listen = "127.0.0.1:3000"
+mode = "behind-proxy"
+# Direct mode fields are reserved for deployments where this process binds public ports.
+http_listen = "0.0.0.0:80"
+https_listen = "0.0.0.0:443"
+# tls_cert = "/etc/letsencrypt/live/proxy.example.com/fullchain.pem"
+# tls_key = "/etc/letsencrypt/live/proxy.example.com/privkey.pem"
+# If a fronting CDN replaces Mirrox-generated 5xx bodies, tunnel the custom page as 200.
+# The original status remains visible and is sent in X-Mirrox-Error-Status.
+# proxy_error_status = 200
+
+[dns]
+mode = "doh"
+servers = ["https://cloudflare-dns.com/dns-query"]
+cache_min_ttl_seconds = 30
+cache_max_ttl_seconds = 300
+timeout_ms = 2000
+
+[upstream_proxy]
+# Use "direct" or omit this table for direct upstream connections.
+# Supported schemes: http://, socks5://, with optional user:pass credentials.
+default = "direct"
+
+[rewrite]
+body = "enabled"
+max_buffer_bytes = 2097152
+# Root mappings act as suffix fallbacks for foo.bgm.tv, while fxbgm.tv is left unchanged.
+
+# [scripts]
+# dir = "./scripts"                   # Local directory containing JS files.
+# prefix = "/mirrox-scripts"          # URL prefix for serving local scripts.
+# global = ["analytics.js", "theme.js"]  # Scripts injected into ALL routes.
+#
+# Per-route scripts are added alongside global scripts:
+# [[routes]]
+# incoming = "a.example.com"
+# upstream = "a.site.com"
+# scripts = ["custom-a.js", "https://cdn.example.com/ext.js"]
+
+[[routes]]
+incoming = "api.example.com"
+upstream = "api.bgm.tv"
+
+[[routes]]
+incoming = "www.example.com"
+upstream = "www.bgm.tv"
+body_rewrite = "http-only"
+upstream_proxy = "http://user:pass@127.0.0.1:8080"
+# scripts = ["custom.js"]           # Route-specific scripts (in addition to global).
+
+[[wildcard_routes]]
+incoming_suffix = ".mirror.example.com"
+upstream_suffix = ".bgm.tv"

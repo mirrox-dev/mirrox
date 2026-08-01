@@ -1,0 +1,213 @@
+# Mirrox
+
+Mirrox 是一个使用 Rust 编写的高性能可配置反向代理，用于发布受控镜像域名。它会把你控制的入口域名映射到 TOML 配置文件中声明的上游域名，并重写 HTTP 层数据和受支持的响应正文，让链接保持在镜像域名下；未配置的 Host 会被拒绝，避免服务变成开放代理。
+
+Mirrox 适合自托管镜像网关、私有域名前置，以及需要显式 host-to-upstream 路由且不希望每次修改域名规则都重新编译程序的部署场景。
+
+仓库：<https://github.com/mirrox-dev/mirrox>
+
+## 特性
+
+- **配置文件优先路由**：在 `config.toml` 中定义精确域名映射和通配后缀映射。
+- **严格 Host 白名单**：未配置 `Host` 的请求返回 `421 Misdirected Request`。
+- **HTTP 重写支持**：重写上游 `Host`、请求 `Origin` / `Referer`、响应 `Location` 和 Cookie Domain。
+- **可选响应体重写**：重写低于缓冲限制的 HTML、CSS、JavaScript 和 JSON 响应体。响应体重写会自动应用所有已配置路由的域名映射，因此响应体中的跨域引用（例如 `api.bgm.tv` 响应中出现的 `lain.bgm.tv`）也会被一并替换。
+- **脚本注入**：向 HTML 响应注入 `<script>` 标签，为镜像站点提供自定义 JS 扩展能力。支持全局脚本（所有路由）和路由级脚本，可使用本地文件或远程 URL。
+- **面向流式传输的行为**：SSE、超大响应和非文本资源会透传，避免不必要的缓冲。
+- **WebSocket 支持**：代理升级后的 WebSocket 连接。
+- **出站代理支持**：上游连接可直连，也可通过 HTTP CONNECT / SOCKS5 代理。
+- **便于部署**：支持 CLI 配置选择、环境变量覆盖、Docker 和 GitHub Release 二进制文件。
+
+## 当前状态
+
+Mirrox 已经可用，但仍处于早期阶段。基于 Hickory 的 resolver 会实际使用配置的 `udp`、`tcp`、`dot` 或 `doh` 服务器、查询超时以及正负缓存 TTL 范围。加密 DNS 服务器自身的 hostname 会先通过宿主机 resolver 完成一次引导解析。
+
+## 快速开始
+
+从示例创建配置文件并运行代理：
+
+```bash
+cp examples/config.example.toml config.toml
+cargo run --release -- -c config.toml
+```
+
+默认服务监听 `127.0.0.1:3000`。
+
+使用指定配置文件路径：
+
+```bash
+mirrox -c /etc/mirrox/config.toml
+mirrox --config /etc/mirrox/config.toml
+```
+
+配置路径优先级：
+
+1. `-c, --config <PATH>`
+2. `MIRROX_CONFIG`
+3. `config.toml`
+
+## Docker
+
+发布镜像生成后，可以从 GHCR 拉取：
+
+```bash
+docker pull ghcr.io/mirrox-dev/mirrox:latest
+```
+
+使用 Docker Compose 运行：
+
+```bash
+docker compose up -d
+```
+
+仓库内的 `docker-compose.yml` 使用 `ghcr.io/mirrox-dev/mirrox:latest`，并把 `./examples/config.example.toml` 挂载到 `/etc/mirrox/config.toml`。实际部署时请把挂载源替换为你自己的配置文件。
+
+直接使用 Docker 运行：
+
+```bash
+docker run --rm \
+  -p 3000:3000 \
+  -e MIRROX_CONFIG=/etc/mirrox/config.toml \
+  -e MIRROX_LISTEN=0.0.0.0:3000 \
+  -v "$PWD/config.toml:/etc/mirrox/config.toml:ro" \
+  ghcr.io/mirrox-dev/mirrox:latest
+```
+
+## 配置示例
+
+```toml
+[server]
+listen = "127.0.0.1:3000"
+mode = "behind-proxy"
+# 仅当前置 CDN 会替换 Mirrox 生成的 5xx 页面时设置：
+# proxy_error_status = 200
+
+[dns]
+mode = "doh"
+servers = ["https://cloudflare-dns.com/dns-query"]
+
+[upstream_proxy]
+default = "direct"
+
+[rewrite]
+body = "enabled"
+max_buffer_bytes = 2097152
+
+[scripts]
+dir = "./scripts"
+# global = ["analytics.js"]         # 注入到所有路由的脚本。
+
+[[routes]]
+incoming = "api.example.com"
+upstream = "api.bgm.tv"
+# 上游默认使用 HTTPS 和 443 端口；需要时可覆盖：
+# upstream_scheme = "http"
+# upstream_port = 80
+# user_agent = "Mirrox/0.1"
+
+[[routes]]
+incoming = "www.example.com"
+upstream = "www.bgm.tv"
+body_rewrite = "http-only"
+upstream_proxy = "http://user:pass@127.0.0.1:8080"
+user_agent = "Mozilla/5.0 (compatible; Mirrox)"
+
+[[wildcard_routes]]
+incoming_suffix = ".example.com"
+upstream_suffix = ".bgm.tv"
+upstream_scheme = "https"
+upstream_port = 443
+```
+
+完整配置说明见 [configuration_zhcn.md](configuration_zhcn.md)。
+
+## 上游连接设置
+
+路由默认使用 HTTPS 连接上游的 `443` 端口。精确 `[[routes]]` 和 `[[wildcard_routes]]` 都可以设置 `upstream_scheme = "http"` 或 `"https"`、`upstream_port` 和 `user_agent`。
+
+省略 `user_agent` 时，Mirrox 会保留客户端请求中的 `User-Agent` 并转发给上游；配置该值时，Mirrox 会用配置值覆盖发往上游请求的 `User-Agent`。
+
+通配路由使用单级标签的多域名模型：`incoming_suffix = ".example.com"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.example.com` 映射到 `api.bgm.tv`，但不会匹配 `v1.api.example.com` 这类更深层级域名。
+
+## Cloudflare Tunnel
+
+Mirrox 部署在 Cloudflare Tunnel 后面时，Cloudflare 可以把多个公网 hostname 或一个通配 hostname 路由到同一个内部服务，例如 `http://mirrox:3000`。Cloudflare 负责公网 HTTPS 终止，Mirrox 在代理后方接收 HTTP，并根据传入的 `Host` 选择路由。
+
+如果 Cloudflare 会把源站 5xx 正文替换为自己的错误页，可设置 `[server].proxy_error_status = 200`。页面仍显示原始状态，响应头 `X-Mirrox-Error-Status` 也会保留该状态，同时错误页禁止缓存。此设置只对已经到达 Mirrox 的请求有效；Cloudflare Tunnel 无法连接 Mirrox 时，请求尚未进入程序，只能在 Cloudflare 侧处理。
+
+## 重写模型
+
+Mirrox 有两层重写：
+
+- **HTTP 层**：请求 `Host`、`Origin`、`Referer`；响应 `Location`；Cookie `Domain` 属性。
+- **响应体层**：低于 `max_buffer_bytes` 的 HTML、CSS、JavaScript 和 JSON 等文本响应。启用响应体重写后，所有已配置路由的域名映射都会应用于每条可重写的响应——不仅仅是当前匹配路由的上游域名，从而确保跨域引用也被透明替换。
+
+重写计划是确定性的：当前请求匹配的路由对自身 upstream 拥有最高优先级；其他共享 upstream 的入口按标准化后的 `incoming` 字典序选择最小值；更长的 upstream 域名优先于较短的后缀托底规则。配置 `bgm.tv -> bangumi.lol` 根域映射后，未显式配置的 `foo.bgm.tv` 也会变成 `foo.bangumi.lol`，但域名标签边界会确保 `fxbgm.tv`、`evil-bgm.tv` 和 `bgm.tv.cn` 保持不变。所有规则只扫描原始输入一次，不会发生级联替换。
+
+响应体重写默认启用。可以在路由上设置 `body_rewrite = "http-only"`，或设置 `MIRROX_REWRITE_BODY=http-only`，以关闭响应体重写但保留 HTTP 层重写。
+
+## 脚本注入
+
+Mirrox 可以向 HTML 响应注入 `<script>` 标签，为镜像站点提供自定义 JavaScript 扩展能力（类似 Tampermonkey / 油猴脚本）。
+
+```toml
+[scripts]
+dir = "./scripts"                     # 本地 JS 文件目录。
+prefix = "/mirrox-scripts"            # URL 前缀（默认：/mirrox-scripts）。
+global = ["analytics.js", "theme.js"] # 注入到所有路由。
+
+[[routes]]
+incoming = "a.example.com"
+upstream = "a.site.com"
+scripts = ["custom-a.js", "https://cdn.example.com/ext.js"]
+```
+
+- 全局脚本先注入，路由级脚本后注入。
+- 本地文件名从 `dir` 目录读取，在 `/{prefix}/{filename}` 路径下提供服务。
+- 远程 URL（`http://` / `https://`）直接作为 `<script src="...">` 使用。
+- `[[routes]]` 和 `[[wildcard_routes]]` 都支持 `scripts` 字段。
+
+完整配置说明见 [configuration_zhcn.md](configuration_zhcn.md)。
+
+## 环境变量
+
+| 变量 | 含义 |
+| --- | --- |
+| `MIRROX_CONFIG` | TOML 配置文件路径；未提供 `-c/--config` 时使用。 |
+| `MIRROX_LISTEN` | 覆盖 `[server].listen`。 |
+| `MIRROX_DNS_SERVERS` | 逗号分隔的 DNS 服务器列表。 |
+| `MIRROX_UPSTREAM_PROXY` | 覆盖上游代理模式；可使用 `direct`、`http://...` 或 `socks5://...`。 |
+| `MIRROX_REWRITE_BODY` | 覆盖响应体重写模式；默认 `enabled`，设置为 `http-only` 可关闭响应体重写。 |
+
+## 发布
+
+推送版本 tag 会创建 GitHub Release、上传原生二进制，并发布 Linux 多架构 GHCR 镜像：
+
+```bash
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+发布 workflow 也接受 `0.1.0` 这样的无 `v` 前缀 semver tag。
+
+镜像发布后使用以下 tag：
+
+```bash
+docker pull ghcr.io/mirrox-dev/mirrox:latest
+docker pull ghcr.io/mirrox-dev/mirrox:v0.1.0
+docker pull ghcr.io/mirrox-dev/mirrox:0.1.0
+docker pull ghcr.io/mirrox-dev/mirrox:0.1
+```
+
+## 开发
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
+cargo check
+```
+
+## 许可证
+
+Mirrox 使用 [MIT License](../LICENSE) 授权。

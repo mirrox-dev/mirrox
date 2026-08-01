@@ -1,0 +1,14 @@
+services:
+  mirrox:
+    image: ghcr.io/mirrox-dev/mirrox:latest
+    container_name: mirrox
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      MIRROX_CONFIG: /etc/mirrox/config.toml
+      MIRROX_LISTEN: 0.0.0.0:3000
+      MIRROX_REWRITE_BODY: enabled
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./examples/config.example.toml:/etc/mirrox/config.toml:ro

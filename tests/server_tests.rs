@@ -1,0 +1,70 @@
+use axum_test::TestServer;
+use mirrox::config::AppConfig;
+use mirrox::server::build_router;
+
+fn config() -> AppConfig {
+    AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[routes]]
+        incoming = "www.example.com"
+        upstream = "www.bgm.tv"
+    "#,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn healthz_returns_ok() {
+    let app = build_router(config()).await.unwrap();
+    let server = TestServer::new(app).unwrap();
+
+    let response = server.get("/healthz").await;
+
+    response.assert_status_ok();
+    response.assert_text("ok");
+}
+
+#[tokio::test]
+async fn readyz_returns_ready() {
+    let app = build_router(config()).await.unwrap();
+    let server = TestServer::new(app).unwrap();
+
+    let response = server.get("/readyz").await;
+
+    response.assert_status_ok();
+    response.assert_text("ready");
+}
+
+#[tokio::test]
+async fn responses_propagate_a_generated_request_id() {
+    let app = build_router(config()).await.unwrap();
+    let server = TestServer::new(app).unwrap();
+
+    let response = server.get("/healthz").await;
+
+    response.assert_status_ok();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("response should expose its request id")
+        .to_str()
+        .unwrap();
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+}
+
+#[tokio::test]
+async fn fallback_responses_also_propagate_request_ids() {
+    let app = build_router(config()).await.unwrap();
+    let server = TestServer::new(app).unwrap();
+
+    let response = server
+        .get("/unknown")
+        .add_header("host", "unknown.example.com")
+        .await;
+
+    response.assert_status(axum::http::StatusCode::MISDIRECTED_REQUEST);
+    assert!(response.headers().contains_key("x-request-id"));
+}
