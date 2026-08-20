@@ -52,3 +52,6 @@ upstream_proxy = "http://user:pass@127.0.0.1:8080"
 [[wildcard_routes]]
 incoming_suffix = ".mirror.example.com"
 upstream_suffix = ".bgm.tv"
+
+# Matches api.mirror.example.com -> api.bgm.tv and apex mirror.example.com -> bgm.tv.
+# Also rewrites unlisted siblings (lain.bgm.tv -> lain.mirror.example.com).

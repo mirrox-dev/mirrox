@@ -86,6 +86,7 @@ max_buffer_bytes = 2097152
 SSE（`text/event-stream`）和非文本资源会直接流式透传，不做正文重写。
 
 重写目标选择完全确定：当前路由对自身 upstream 优先；其他共享 upstream 的映射选择标准化后字典序最小的 incoming；更长的 upstream 域名优先于短后缀规则。配置 `bgm.tv -> bangumi.lol` 根域映射后，它会为 `foo.bgm.tv` 提供托底；域名标签边界保证 `fxbgm.tv`、`evil-bgm.tv` 和 `bgm.tv.cn` 不会被修改。替换器只扫描原始输入一次，替换结果不会再次触发其他规则。
+`[[wildcard_routes]]` 后缀规则会贡献同样的根域托底（`bgm.tv` → `example.com`），不必把每个兄弟子域都写成精确路由。
 
 ## 脚本注入
 
@@ -147,6 +148,7 @@ upstream_port = 443
 ```
 
 通配后缀路由会把单级子域名前缀映射到另一个后缀。例如 `incoming_suffix = ".example.com"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.example.com` 映射到 `api.bgm.tv`。它只匹配后缀前的一个标签，因此 `v1.api.example.com` 不会被这条通配路由匹配。精确路由优先级高于通配后缀路由。
+同一条规则也会匹配 apex 主机（`example.com` → `bgm.tv`），并作为未列出兄弟域名的重写托底（`lain.bgm.tv` → `lain.example.com`）。
 
 通配路由支持与精确路由相同的上游连接字段：`upstream_scheme = "http"` 或 `"https"`、`upstream_port`、`user_agent` 和 `scripts`。省略时，通配路由的上游同样默认使用 HTTPS 443，并保留客户端的 `User-Agent`。
 

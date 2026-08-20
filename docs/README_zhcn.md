@@ -128,6 +128,7 @@ upstream_port = 443
 省略 `user_agent` 时，Mirrox 会保留客户端请求中的 `User-Agent` 并转发给上游；配置该值时，Mirrox 会用配置值覆盖发往上游请求的 `User-Agent`。
 
 通配路由使用单级标签的多域名模型：`incoming_suffix = ".example.com"` 搭配 `upstream_suffix = ".bgm.tv"` 会把 `api.example.com` 映射到 `api.bgm.tv`，但不会匹配 `v1.api.example.com` 这类更深层级域名。
+同一条后缀规则也会匹配 apex 主机（`example.com` → `bgm.tv`），并作为重写托底，因此未单独列出的 `lain.bgm.tv` 会变成 `lain.example.com`。
 
 ## Cloudflare Tunnel
 
@@ -143,6 +144,7 @@ Mirrox 有两层重写：
 - **响应体层**：低于 `max_buffer_bytes` 的 HTML、CSS、JavaScript 和 JSON 等文本响应。启用响应体重写后，所有已配置路由的域名映射都会应用于每条可重写的响应——不仅仅是当前匹配路由的上游域名，从而确保跨域引用也被透明替换。
 
 重写计划是确定性的：当前请求匹配的路由对自身 upstream 拥有最高优先级；其他共享 upstream 的入口按标准化后的 `incoming` 字典序选择最小值；更长的 upstream 域名优先于较短的后缀托底规则。配置 `bgm.tv -> bangumi.lol` 根域映射后，未显式配置的 `foo.bgm.tv` 也会变成 `foo.bangumi.lol`，但域名标签边界会确保 `fxbgm.tv`、`evil-bgm.tv` 和 `bgm.tv.cn` 保持不变。所有规则只扫描原始输入一次，不会发生级联替换。
+通配后缀规则会自动提供这条根域映射（`bgm.tv` → `example.com`），不再需要单独写一条 apex `[[routes]]` 才能覆盖跨子域重写。
 
 响应体重写默认启用。可以在路由上设置 `body_rewrite = "http-only"`，或设置 `MIRROX_REWRITE_BODY=http-only`，以关闭响应体重写但保留 HTTP 层重写。
 

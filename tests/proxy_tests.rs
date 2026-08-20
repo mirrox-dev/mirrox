@@ -345,6 +345,51 @@ async fn rewrites_cross_domain_location_header() {
 }
 
 #[tokio::test]
+async fn wildcard_route_rewrites_sibling_hosts_via_suffix_fallback() {
+    let app = Router::new().route("/*path", any(multi_domain_upstream));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[wildcard_routes]]
+        incoming_suffix = ".bangumi.pro"
+        upstream_suffix = ".bgm.tv"
+        upstream_scheme = "http"
+    "#,
+    )
+    .unwrap();
+    let routes = RouteTable::from_config(&config);
+    let dns = Arc::new(StaticResolver::new(vec![addr]));
+    let app = build_router_with_state(Arc::new(ProxyState::new(config, routes, dns)))
+        .await
+        .unwrap();
+
+    let server = axum_test::TestServer::new(app).unwrap();
+    let response = server
+        .get("/calendar")
+        .add_header("host", "api.bangumi.pro")
+        .await;
+
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(
+        !body.contains("lain.bgm.tv") && !body.contains("api.bgm.tv"),
+        "wildcard suffix fallback should rewrite sibling upstream hosts, but body was: {body}"
+    );
+    assert!(
+        body.contains("lain.bangumi.pro") && body.contains("api.bangumi.pro"),
+        "body should contain mirror hosts, but was: {body}"
+    );
+}
+
+#[tokio::test]
 async fn http_only_route_does_not_rewrite_body() {
     let app = Router::new().route("/*path", any(rewrite_upstream));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

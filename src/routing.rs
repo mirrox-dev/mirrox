@@ -110,8 +110,8 @@ impl RouteTable {
     }
 
     /// Returns one deterministic `(upstream, incoming)` pair per exact
-    /// upstream. Shared upstreams select the lexicographically smallest
-    /// normalized incoming host.
+    /// upstream and per wildcard suffix fallback. Shared upstreams select
+    /// the lexicographically smallest normalized incoming host.
     pub fn all_rewrite_pairs(&self) -> Vec<(String, String)> {
         sorted_pairs(self.lexical_rewrite_targets())
     }
@@ -119,7 +119,10 @@ impl RouteTable {
     /// Builds the response rewrite plan for a matched route.
     ///
     /// The current route always wins for its own upstream. Ambiguous mappings
-    /// for sibling upstreams use their lexicographically smallest incoming host.
+    /// for sibling exact routes use their lexicographically smallest incoming
+    /// host. Wildcard suffix pairs contribute a root fallback
+    /// (`.example.com` / `.bgm.tv` → `bgm.tv` → `example.com`) so unlisted
+    /// sibling hosts rewrite without being enumerated as exact routes.
     pub fn rewrite_plan_for(&self, current: &MatchedRoute) -> RewritePlan {
         let mut selected = self.lexical_rewrite_targets();
         selected.insert(current.upstream_host.clone(), current.incoming_host.clone());
@@ -148,15 +151,21 @@ impl RouteTable {
         }
 
         self.wildcard.iter().find_map(|rule| {
-            let prefix = host.strip_suffix(&rule.incoming_suffix)?;
-            if prefix.is_empty() || prefix.contains('.') {
-                return None;
-            }
+            let incoming_apex = rule.incoming_suffix.trim_start_matches('.');
+            let upstream_host = if host == incoming_apex {
+                rule.upstream_suffix.trim_start_matches('.').to_string()
+            } else {
+                let prefix = host.strip_suffix(&rule.incoming_suffix)?;
+                if prefix.is_empty() || prefix.contains('.') {
+                    return None;
+                }
+                format!("{}{}", prefix, rule.upstream_suffix)
+            };
             let mut scripts = self.global_scripts.clone();
             scripts.extend(rule.scripts.iter().cloned());
             Some(MatchedRoute {
                 incoming_host: host.clone(),
-                upstream_host: format!("{}{}", prefix, rule.upstream_suffix),
+                upstream_host,
                 body_rewrite: rule.body_rewrite.clone(),
                 upstream_proxy: rule.upstream_proxy.clone(),
                 upstream_scheme: rule.upstream_scheme.clone(),
@@ -170,17 +179,28 @@ impl RouteTable {
     fn lexical_rewrite_targets(&self) -> BTreeMap<String, String> {
         let mut selected = BTreeMap::new();
         for route in &self.ordered_exact {
-            selected
-                .entry(route.upstream_host.clone())
-                .and_modify(|incoming: &mut String| {
-                    if route.incoming_host < *incoming {
-                        incoming.clone_from(&route.incoming_host);
-                    }
-                })
-                .or_insert_with(|| route.incoming_host.clone());
+            record_rewrite_target(&mut selected, &route.upstream_host, &route.incoming_host);
+        }
+        for rule in &self.wildcard {
+            record_rewrite_target(
+                &mut selected,
+                rule.upstream_suffix.trim_start_matches('.'),
+                rule.incoming_suffix.trim_start_matches('.'),
+            );
         }
         selected
     }
+}
+
+fn record_rewrite_target(selected: &mut BTreeMap<String, String>, from: &str, to: &str) {
+    selected
+        .entry(from.to_string())
+        .and_modify(|incoming: &mut String| {
+            if to < incoming.as_str() {
+                to.clone_into(incoming);
+            }
+        })
+        .or_insert_with(|| to.to_string());
 }
 
 fn sorted_pairs(targets: BTreeMap<String, String>) -> Vec<(String, String)> {

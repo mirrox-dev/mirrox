@@ -86,6 +86,7 @@ max_buffer_bytes = 2097152
 SSE (`text/event-stream`) and non-text assets are streamed through without body rewriting.
 
 Rewrite target selection is deterministic: the current route wins for its own upstream, ambiguous sibling mappings choose the lexicographically smallest normalized incoming host, and longer upstream hosts precede shorter suffix rules. A configured root mapping such as `bgm.tv -> bangumi.lol` acts as the intentional fallback for `foo.bgm.tv`. Matching observes DNS-label boundaries, so `fxbgm.tv`, `evil-bgm.tv`, and `bgm.tv.cn` are not modified. The engine scans original input once and does not cascade replacement output through later rules.
+A `[[wildcard_routes]]` suffix pair contributes the same kind of root fallback (`bgm.tv` → `example.com`) without listing every sibling as an exact route.
 
 ## Script injection
 
@@ -147,6 +148,7 @@ upstream_port = 443
 ```
 
 Wildcard routes map a single-label subdomain prefix to another suffix. For example, `incoming_suffix = ".example.com"` with `upstream_suffix = ".bgm.tv"` maps `api.example.com` to `api.bgm.tv`. It only matches one label before the suffix, so `v1.api.example.com` is not matched by that wildcard route. Exact routes take priority over wildcard routes.
+The same rule also matches the apex host (`example.com` → `bgm.tv`) and is used as a rewrite fallback for unlisted siblings (`lain.bgm.tv` → `lain.example.com`).
 
 Wildcard routes support the same upstream connection fields as exact routes: `upstream_scheme = "http"` or `"https"`, `upstream_port`, `user_agent`, and `scripts`. If omitted, wildcard upstreams also default to HTTPS on port `443` and preserve the client's `User-Agent`.
 

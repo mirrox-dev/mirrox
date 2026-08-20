@@ -128,6 +128,7 @@ Routes connect to upstreams with HTTPS on port `443` by default. Both exact `[[r
 If `user_agent` is omitted, Mirrox preserves the client's `User-Agent` header on the upstream request. If configured, Mirrox replaces the upstream request `User-Agent` with that value.
 
 Wildcard routes use a single-label multi-domain model: `incoming_suffix = ".example.com"` with `upstream_suffix = ".bgm.tv"` maps `api.example.com` to `api.bgm.tv`, but does not match deeper names such as `v1.api.example.com`.
+The same suffix pair also matches the apex host (`example.com` → `bgm.tv`) and contributes a rewrite fallback, so unlisted siblings such as `lain.bgm.tv` become `lain.example.com`.
 
 ## Cloudflare Tunnel
 
@@ -143,6 +144,7 @@ Mirrox has two rewrite layers:
 - **Body layer**: supported text responses such as HTML, CSS, JavaScript, and JSON under `max_buffer_bytes`. When body rewriting is enabled, all configured route domain mappings are applied to every rewritable response — not just the upstream host from the matched route. This ensures cross-domain references are transparently rewritten.
 
 Rewrite plans are deterministic. The current route wins for its own upstream; if another upstream has multiple incoming aliases, the lexicographically smallest normalized incoming host is selected. Longer upstream hosts run before shorter suffix fallbacks. A root mapping such as `bgm.tv -> bangumi.lol` therefore rewrites unlisted `foo.bgm.tv`, while DNS-label boundaries keep unrelated names such as `fxbgm.tv`, `evil-bgm.tv`, and `bgm.tv.cn` unchanged. All replacements are applied to the original input in one pass, so replacement output cannot cascade into another rule.
+Wildcard suffix pairs supply that root mapping automatically (`bgm.tv` → `example.com`); an explicit apex `[[routes]]` entry is no longer required for sibling rewrite coverage.
 
 Body rewriting defaults to `enabled`. Set `body_rewrite = "http-only"` on a route, or set `MIRROX_REWRITE_BODY=http-only`, to disable body rewriting while keeping HTTP-layer rewriting.
 

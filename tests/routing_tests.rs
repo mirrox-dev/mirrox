@@ -101,6 +101,37 @@ fn wildcard_maps_subdomain_suffix() {
     assert_eq!(route.upstream_port, 443);
 }
 
+fn wildcard_only_table() -> RouteTable {
+    let config = AppConfig::from_toml_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:3000"
+
+        [[wildcard_routes]]
+        incoming_suffix = ".bangumi.pro"
+        upstream_suffix = ".bgm.tv"
+    "#,
+    )
+    .unwrap();
+    RouteTable::from_config(&config)
+}
+
+#[test]
+fn wildcard_maps_apex_host() {
+    let route = wildcard_only_table()
+        .match_host("bangumi.pro")
+        .expect("apex host should match wildcard suffix");
+    assert_eq!(route.incoming_host, "bangumi.pro");
+    assert_eq!(route.upstream_host, "bgm.tv");
+}
+
+#[test]
+fn wildcard_rejects_multi_label_prefix() {
+    assert!(wildcard_only_table()
+        .match_host("v1.api.bangumi.pro")
+        .is_none());
+}
+
 #[test]
 fn host_port_is_ignored_for_matching() {
     let route = table()
@@ -132,6 +163,42 @@ fn rewrite_pairs_for_wildcard_match_include_matched_route_mapping() {
     assert!(
         pairs.contains(&("www.bgm.tv".to_string(), "www.example.com".to_string())),
         "exact route mappings must still be present, got: {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("bgm.tv".to_string(), "example.com".to_string())),
+        "wildcard suffix must contribute a root rewrite fallback, got: {pairs:?}"
+    );
+}
+
+#[test]
+fn wildcard_rewrite_plan_uses_suffix_fallback_for_siblings() {
+    let table = wildcard_only_table();
+    let route = table
+        .match_host("api.bangumi.pro")
+        .expect("wildcard route should match");
+
+    let rewritten = table.rewrite_plan_for(&route).rewrite(
+        "https://lain.bgm.tv/calendar https://bgm.tv/ https://api.bgm.tv/v0 https://fxbgm.tv",
+    );
+
+    assert_eq!(
+        rewritten,
+        "https://lain.bangumi.pro/calendar https://bangumi.pro/ https://api.bangumi.pro/v0 https://fxbgm.tv"
+    );
+}
+
+#[test]
+fn exact_match_still_gets_wildcard_suffix_fallback() {
+    let table = table();
+    let route = table
+        .match_host("www.example.com")
+        .expect("exact route should match");
+
+    assert_eq!(
+        table
+            .rewrite_plan_for(&route)
+            .rewrite("https://lain.bgm.tv/calendar"),
+        "https://lain.example.com/calendar"
     );
 }
 
